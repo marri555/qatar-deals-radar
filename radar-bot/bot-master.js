@@ -1,9 +1,20 @@
+import http from 'http';
 import { Telegraf, Markup } from 'telegraf';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 
-const BOT_TOKEN = 'ضع_هنا_التوكن_الخاص_بك';
+// تشغيل خادم ويب خفيف لإبقاء خدمة Render Web Service حية ومستمرة
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('🤖 رادار صفقات قطر يعمل بنجاح في السحابة!');
+}).listen(PORT, () => {
+  console.log(`🌐 Web server running on port ${PORT}`);
+});
+
+// توكن البوت (يقرأ من متغيرات البيئة أو القيمة المباشرة)
+const BOT_TOKEN = process.env.BOT_TOKEN || '8858663547:AAFDhBpmaTUolGKMBfjZYhK8kcPoGhSWMm8';
 const bot = new Telegraf(BOT_TOKEN);
 
 const DB_FILE = './user_alerts.json';
