@@ -343,11 +343,20 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
 }
 
 // ------------------- بدء التشغيل والجدولة -------------------
-bot.launch().then(() => {
-  console.log('🤖 البوت ورادار الفحص يعملان الآن بنجاح...');
-  setInterval(runRadarScan, 60000); // فحص دوري كل 60 ثانية
-  runRadarScan();
-});
+// ------------------- بدء التشغيل والجدولة -------------------
+bot.launch({
+  dropPendingUpdates: true
+}).then(() => {
+  console.log('🚀 [BOT LIVE] تم إقلاع البوت والاتصال بتليجرام بنجاح!');
+  
+  // تشغيل دوري كل دقيقة
+  setInterval(() => {
+    console.log('⏰ [Heartbeat] دقيقة مرت - جاري استدعاء محرك الفحص...');
+    runRadarScan().catch(err => console.error('❌ خطأ غير متوقع في الفحص:', err));
+  }, 60000);
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  // تشغيل فحص فوري عند البداية
+  runRadarScan().catch(err => console.error('❌ خطأ في أول فحص:', err));
+}).catch((err) => {
+  console.error('❌ فشل إقلاع البوت:', err.message);
+});
