@@ -328,6 +328,9 @@ async function runRadarScan() {
 
   const platforms = [
     {
+      // معروف: هذا الموقع محمي بـ Cloudflare/WAF حقيقي (يرجع HTTP 403 دائماً).
+      // تغيير الهيدرز وحده غير كافٍ لتجاوزه — يحتاج متصفح حقيقي (Puppeteer) أو
+      // خدمة Anti-bot مدفوعة. تم تأجيل هذا الحل عمداً لتبقى الخدمة خفيفة ومستقرة.
       label: 'Mzad Qatar | مزاد قطر',
       logTag: 'Mzad',
       url: 'https://mzadqatar.com/ar',
@@ -335,6 +338,9 @@ async function runRadarScan() {
       cardSelectors: ['.ad-card', '.listing-card', 'article', '.card', 'li.item', '[class*="listing"]']
     },
     {
+      // معروف: صفحة الإعلانات هنا تطبيق SPA يحمّل الإعلانات الفعلية عبر
+      // JavaScript بعد التحميل الأولي — غير موجودة في الـ HTML الذي يجلبه axios.
+      // نفس قرار عدم إضافة متصفح حقيقي (Puppeteer) ينطبق هنا لنفس سبب الاستقرار.
       label: 'Qatar Living | قطر ليفنج',
       logTag: 'QatarLiving',
       url: 'https://www.qatarliving.com/classifieds',
@@ -349,19 +355,16 @@ async function runRadarScan() {
       cardSelectors: ['.postListItemData', '.item', 'article', '.card', 'li.item']
     },
     {
+      // معروف: نفس وضع مزاد قطر — حماية Cloudflare/WAF حقيقية (HTTP 403).
       label: 'Qatar Sale | قطر سيل',
       logTag: 'QatarSale',
       url: 'https://qatarsale.com',
       baseUrl: 'https://qatarsale.com',
       cardSelectors: ['.product', '.item', 'article', '.card', 'tr']
-    },
-    {
-      label: 'Sooum | منصة سوم',
-      logTag: 'Sooum',
-      url: 'https://sooum.com',
-      baseUrl: 'https://sooum.com',
-      cardSelectors: ['.ad-item', '.item', 'article', '.card']
     }
+    // Sooum (sooum.com) مُعطّلة عمداً: الدومين لا يستجيب فعلياً ويشير إلى
+    // عنوان IP غير متعلق بقطر إطلاقاً (يبدو منتهي الصلاحية أو مسجّل لجهة أخرى)،
+    // وليست مجرد حماية بوتات. أعد تفعيلها هنا فقط لو توفر رابط صحيح للمنصة.
   ];
 
   const settled = await Promise.allSettled(
