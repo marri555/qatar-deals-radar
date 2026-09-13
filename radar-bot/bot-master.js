@@ -342,21 +342,29 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
   }
 }
 
+// ------------------- بدء التشغيل والجدولة المستقلة -------------------
 
-// ------------------- بدء التشغيل والجدولة -------------------
+// 1. تشغيل محرك الفحص فوراً وبشكل دوري كل دقيقة (مستقل تماماً)
+console.log('⚡ [SYSTEM] جاري بدء تشغيل محرك رادار قطر...');
+setInterval(() => {
+  console.log('⏰ [Heartbeat] دقيقة مرت - جاري فحص المنصات الآن...');
+  runRadarScan().catch(err => console.error('❌ خطأ في دورة الفحص:', err.message));
+}, 60000);
+
+// تشغيل أول فحص فوراً بعد 3 ثوانٍ من الإقلاع
+setTimeout(() => {
+  console.log('🚀 [RADAR] انطلاق أول جولة فحص...');
+  runRadarScan().catch(err => console.error('❌ خطأ في أول جولة:', err.message));
+}, 3000);
+
+// 2. تشغيل استماع التيليجرام
 bot.launch({
   dropPendingUpdates: true
 }).then(() => {
-  console.log('🚀 [BOT LIVE] تم إقلاع البوت والاتصال بتليجرام بنجاح!');
-  
-  // تشغيل دوري كل دقيقة
-  setInterval(() => {
-    console.log('⏰ [Heartbeat] دقيقة مرت - جاري استدعاء محرك الفحص...');
-    runRadarScan().catch(err => console.error('❌ خطأ غير متوقع في الفحص:', err));
-  }, 60000);
-
-  // تشغيل فحص فوري عند البداية
-  runRadarScan().catch(err => console.error('❌ خطأ في أول فحص:', err));
+  console.log('🤖 [TELEGRAM] البوت متصل ومستعد لاستقبال الأوامر!');
 }).catch((err) => {
-  console.error('❌ فشل إقلاع البوت:', err.message);
+  console.error('⚠️ تحذير اتصال تليجرام:', err.message);
 });
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
