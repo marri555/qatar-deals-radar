@@ -14,7 +14,7 @@ http.createServer((req, res) => {
 });
 
 // ------------------- إعداد البوت والملفات -------------------
-const BOT_TOKEN = process.env.BOT_TOKEN || '8858663547:AAFDhBpmaTUolGKMBfjZYhK8kcPoGhSWMm8';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8858663547:AAFprfXgaKdt8jftll79aHK0pyNkgO6SKt8';
 const bot = new Telegraf(BOT_TOKEN);
 
 const DB_FILE = './user_alerts.json';
