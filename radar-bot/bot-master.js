@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import http from 'http';
 import { Telegraf, Markup } from 'telegraf';
 import axios from 'axios';
@@ -5,16 +6,34 @@ import * as cheerio from 'cheerio';
 import fs from 'fs';
 
 // ------------------- خادم الويب للحفاظ على نشاط الخدمة على Render -------------------
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
+const PORT = process.env.PORT || 10000;
+const httpServer = http.createServer((req, res) => {
+  // رد فوري 200 OK لأي طلب (فحوصات صحة Render / أي بينغ خارجي)
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('🤖 رادار صفقات قطر يعمل بنجاح في السحابة!');
-}).listen(PORT, () => {
+});
+httpServer.on('error', (err) => {
+  console.error('❌ [WEB SERVER] خطأ في خادم الويب:', err.message);
+});
+httpServer.listen(PORT, () => {
   console.log(`🌐 Web server running on port ${PORT}`);
+  console.log('Available at your primary URL');
+});
+
+// ------------------- حماية العملية من الانهيار الصامت -------------------
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ [UNHANDLED REJECTION]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ [UNCAUGHT EXCEPTION]', err.stack || err.message);
 });
 
 // ------------------- إعداد البوت والملفات -------------------
-const BOT_TOKEN = process.env.BOT_TOKEN || '8858663547:AAFprfXgaKdt8jftll79aHK0pyNkgO6SKt8';
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error('❌ [FATAL] متغير البيئة BOT_TOKEN غير موجود. أضفه في Render → Environment، أو في ملف .env محلياً، ثم أعد التشغيل.');
+  process.exit(1);
+}
 const bot = new Telegraf(BOT_TOKEN);
 
 const DB_FILE = './user_alerts.json';
@@ -58,7 +77,9 @@ const i18n = {
     no_alerts: '⚠️ ليس لديك أي رادارات نشطة حالياً.',
     my_alerts_title: '📋 <b>راداراتك الشغالة حالياً:</b>\n\n',
     cleared: '🗑️ تم مسح جميع راداراتك بنجاح.',
-    alert_msg: (platform, kw, text, price, link) => `🚨 <b>صيدة جديدة تطابق رادارك!</b>\n\n📍 <b>المنصة:</b> ${platform}\n🎯 <b>طلبك:</b> ${kw}\n📝 <b>الإعلان:</b> ${text}\n💰 <b>السعر:</b> ${price > 0 ? price.toLocaleString() + ' ر.ق' : 'راجع الإعلان'}\n\n🔗 <a href="${link}">اضغط هنا لفتح الإعلان فوراً</a>`
+    alert_msg: (platform, kw, text, price, link) => `🚨 <b>صيدة جديدة تطابق رادارك!</b>\n\n📍 <b>المنصة:</b> ${platform}\n🎯 <b>طلبك:</b> ${kw}\n📝 <b>الإعلان:</b> ${text}\n💰 <b>السعر:</b> ${price > 0 ? price.toLocaleString() + ' ر.ق' : 'راجع الإعلان'}\n\n🔗 <a href="${link}">اضغط هنا لفتح الإعلان فوراً</a>`,
+    testscan_running: '🔍 جارٍ تشغيل فحص تشخيصي فوري...',
+    testscan_report: (alertsCount, lines) => `🧪 <b>تقرير الفحص التشخيصي</b>\n\n📋 <b>عدد الرادارات النشطة:</b> ${alertsCount}\n\n${lines}`
   },
   en: {
     welcome: (name) => `Welcome <b>${name}</b> to <b>Qatar Smart Radar 🇶🇦</b>\n\nAutomated bot tracking the latest listings across all Qatari platforms in real time.\n\nChoose an option below 👇`,
@@ -72,7 +93,9 @@ const i18n = {
     no_alerts: '⚠️ You have no active radars currently.',
     my_alerts_title: '📋 <b>Your Active Radars:</b>\n\n',
     cleared: '🗑️ All your radars have been cleared.',
-    alert_msg: (platform, kw, text, price, link) => `🚨 <b>New Deal Found!</b>\n\n📍 <b>Platform:</b> ${platform}\n🎯 <b>Keyword:</b> ${kw}\n📝 <b>Title:</b> ${text}\n💰 <b>Price:</b> ${price > 0 ? price.toLocaleString() + ' QAR' : 'Check Listing'}\n\n🔗 <a href="${link}">Click here to view deal</a>`
+    alert_msg: (platform, kw, text, price, link) => `🚨 <b>New Deal Found!</b>\n\n📍 <b>Platform:</b> ${platform}\n🎯 <b>Keyword:</b> ${kw}\n📝 <b>Title:</b> ${text}\n💰 <b>Price:</b> ${price > 0 ? price.toLocaleString() + ' QAR' : 'Check Listing'}\n\n🔗 <a href="${link}">Click here to view deal</a>`,
+    testscan_running: '🔍 Running immediate diagnostic scan...',
+    testscan_report: (alertsCount, lines) => `🧪 <b>Diagnostic Scan Report</b>\n\n📋 <b>Active radars:</b> ${alertsCount}\n\n${lines}`
   }
 };
 
@@ -142,6 +165,28 @@ bot.action('ACTION_CLEAR', (ctx) => {
   ctx.reply(i18n[lang].cleared, getMenuKeyboard(lang));
 });
 
+// أمر تشخيصي: فحص فوري لكل المنصات + تقرير مباشر على تيليجرام
+bot.command('testscan', async (ctx) => {
+  const lang = getUserLang(ctx.chat.id);
+  const t = i18n[lang];
+  try {
+    await ctx.reply(t.testscan_running);
+    const alerts = getAlerts();
+    const results = await runRadarScan();
+
+    const lines = results.map(r => {
+      const statusIcon = r.error ? '❌' : '✅';
+      const statusText = r.error ? `ERROR: ${r.error}` : `HTTP ${r.status}`;
+      return `${statusIcon} <b>${r.platform}</b> — ${statusText} — ${r.count} items inspected`;
+    }).join('\n');
+
+    await ctx.replyWithHTML(t.testscan_report(alerts.length, lines));
+  } catch (err) {
+    console.error('❌ [/testscan] خطأ:', err.message);
+    ctx.reply(`❌ /testscan failed: ${err.message}`).catch(() => {});
+  }
+});
+
 bot.on('text', (ctx) => {
   const chatId = ctx.chat.id;
   const lang = getUserLang(chatId);
@@ -184,134 +229,154 @@ bot.on('text', (ctx) => {
   ctx.replyWithHTML(t.welcome(ctx.from.first_name || 'User'), getMenuKeyboard(lang));
 });
 
+// معالج أخطاء عام لتيليجراف - يمنع انهيار العملية بسبب خطأ في معالج تحديث واحد
+bot.catch((err, ctx) => {
+  console.error(`❌ [BOT ERROR] update ${ctx.updateType}:`, err.message);
+});
+
 // ------------------- محرك الفحص والمسح المطور -------------------
+
+// عميل Axios مخصص بهيدرز متصفح حقيقية ومهلة صارمة 10 ثوانٍ
+const httpClient = axios.create({
+  timeout: 10000,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ar-QA,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://www.google.com/',
+    'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Upgrade-Insecure-Requests': '1',
+    'Connection': 'keep-alive'
+  },
+  // لا نرمي استثناء على أكواد الحالة غير الناجحة، نريد رؤيتها في التشخيص
+  validateStatus: () => true
+});
+
+// يحاول عدة محددات CSS واقعية لبطاقات الإعلانات حتى يجد نتائج كافية
+function extractListings($, baseUrl, cardSelectors) {
+  for (const sel of cardSelectors) {
+    const cards = $(sel);
+    if (cards.length < 3) continue;
+
+    const listings = [];
+    cards.each((i, el) => {
+      const $el = $(el);
+      const rawLink = $el.is('a') ? $el.attr('href') : $el.find('a').first().attr('href');
+      if (!rawLink) return;
+
+      const titleEl = $el.find('h1, h2, h3, h4, h5, .title, .ad-title, .card-title, [class*="title"]').first();
+      const priceEl = $el.find('.price, .ad-price, [class*="price"]').first();
+
+      const title = (titleEl.text() || $el.text()).replace(/\s+/g, ' ').trim();
+      const priceText = priceEl.text().replace(/\s+/g, ' ').trim();
+      const text = priceText && !title.includes(priceText) ? `${title} ${priceText}` : title;
+
+      if (!text || text.length < 5) return;
+      const fullLink = rawLink.startsWith('http') ? rawLink : baseUrl + rawLink;
+      listings.push({ text, link: fullLink });
+    });
+
+    if (listings.length) return listings;
+  }
+  return [];
+}
+
+// خطة احتياطية: مسح كل الروابط واستنتاج النص من أقرب حاوية أب
+function extractListingsFallback($, baseUrl) {
+  const listings = [];
+  $('a').each((i, el) => {
+    const $el = $(el);
+    const rawLink = $el.attr('href') || '';
+    const containerText = $el.closest('div, li, article').text().replace(/\s+/g, ' ').trim();
+    const text = containerText.length > 10 ? containerText : $el.text().replace(/\s+/g, ' ').trim();
+
+    if (!rawLink || text.length < 5) return;
+    const fullLink = rawLink.startsWith('http') ? rawLink : baseUrl + rawLink;
+    listings.push({ text, link: fullLink });
+  });
+  return listings;
+}
+
+async function scanPlatform({ label, logTag, url, baseUrl, cardSelectors, alerts }) {
+  try {
+    const response = await httpClient.get(url);
+    const status = response.status;
+    const $ = cheerio.load(response.data || '');
+
+    let listings = extractListings($, baseUrl, cardSelectors);
+    if (listings.length === 0) listings = extractListingsFallback($, baseUrl);
+
+    console.log(`[${logTag}] Found ${listings.length} listings (HTTP ${status})`);
+
+    for (const { text, link } of listings) {
+      checkAndSendAlert(alerts, text, link, label);
+    }
+
+    return { platform: label, status, count: listings.length, error: null };
+  } catch (err) {
+    const status = err.response?.status || 0;
+    console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
+    return { platform: label, status, count: 0, error: err.message };
+  }
+}
 
 async function runRadarScan() {
   const alerts = getAlerts();
-  if (alerts.length === 0) return;
-
   console.log(`🔍 [Radar] بدء جولة فحص المنصات لـ (${alerts.length}) رادار نشط...`);
 
-  await Promise.allSettled([
-    scanMzadQatar(alerts),
-    scanQatarLiving(alerts),
-    scanOpenSooq(alerts),
-    scanQatarSale(alerts),
-    scanSooum(alerts)
-  ]);
-}
+  const platforms = [
+    {
+      label: 'Mzad Qatar | مزاد قطر',
+      logTag: 'Mzad',
+      url: 'https://mzadqatar.com/ar',
+      baseUrl: 'https://mzadqatar.com',
+      cardSelectors: ['.ad-card', '.listing-card', 'article', '.card', 'li.item', '[class*="listing"]']
+    },
+    {
+      label: 'Qatar Living | قطر ليفنج',
+      logTag: 'QatarLiving',
+      url: 'https://www.qatarliving.com/classifieds',
+      baseUrl: 'https://www.qatarliving.com',
+      cardSelectors: ['.view-content .views-row', '.classified-item', 'article', '.card', '[class*="teaser"]']
+    },
+    {
+      label: 'OpenSooq | السوق المفتوح',
+      logTag: 'OpenSooq',
+      url: 'https://qa.opensooq.com/ar',
+      baseUrl: 'https://qa.opensooq.com',
+      cardSelectors: ['.postListItemData', '.item', 'article', '.card', 'li.item']
+    },
+    {
+      label: 'Qatar Sale | قطر سيل',
+      logTag: 'QatarSale',
+      url: 'https://qatarsale.com',
+      baseUrl: 'https://qatarsale.com',
+      cardSelectors: ['.product', '.item', 'article', '.card', 'tr']
+    },
+    {
+      label: 'Sooum | منصة سوم',
+      logTag: 'Sooum',
+      url: 'https://sooum.com',
+      baseUrl: 'https://sooum.com',
+      cardSelectors: ['.ad-item', '.item', 'article', '.card']
+    }
+  ];
 
-async function scanMzadQatar(alerts) {
-  try {
-    const { data: html } = await axios.get('https://mzadqatar.com/ar', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 12000
-    });
-    const $ = cheerio.load(html);
+  const settled = await Promise.allSettled(
+    platforms.map(p => scanPlatform({ ...p, alerts }))
+  );
 
-    $('a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const containerText = $(el).closest('div, li, article').text().replace(/\s+/g, ' ').trim();
-      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
-
-      if (!link || text.length < 5) return;
-      const fullLink = link.startsWith('http') ? link : 'https://mzadqatar.com' + link;
-      checkAndSendAlert(alerts, text, fullLink, 'Mzad Qatar | مزاد قطر');
-    });
-  } catch (err) {
-    console.log('⚠️ فحص مزاد قطر:', err.message);
-  }
-}
-
-async function scanQatarLiving(alerts) {
-  try {
-    const { data: html } = await axios.get('https://www.qatarliving.com/classifieds', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 12000
-    });
-    const $ = cheerio.load(html);
-
-    $('a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const containerText = $(el).closest('div, article').text().replace(/\s+/g, ' ').trim();
-      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
-
-      if (!link || text.length < 5) return;
-      const fullLink = link.startsWith('http') ? link : 'https://www.qatarliving.com' + link;
-      checkAndSendAlert(alerts, text, fullLink, 'Qatar Living | قطر ليفنج');
-    });
-  } catch (err) {
-    console.log('⚠️ فحص قطر ليفنج:', err.message);
-  }
-}
-
-async function scanOpenSooq(alerts) {
-  try {
-    const { data: html } = await axios.get('https://qa.opensooq.com/ar', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 12000
-    });
-    const $ = cheerio.load(html);
-
-    $('a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const containerText = $(el).closest('div, li').text().replace(/\s+/g, ' ').trim();
-      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
-
-      if (!link || text.length < 5) return;
-      const fullLink = link.startsWith('http') ? link : 'https://qa.opensooq.com' + link;
-      checkAndSendAlert(alerts, text, fullLink, 'OpenSooq | السوق المفتوح');
-    });
-  } catch (err) {
-    console.log('⚠️ فحص السوق المفتوح:', err.message);
-  }
-}
-
-async function scanQatarSale(alerts) {
-  try {
-    const { data: html } = await axios.get('https://qatarsale.com', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 12000
-    });
-    const $ = cheerio.load(html);
-
-    $('a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const containerText = $(el).closest('div, tr, li').text().replace(/\s+/g, ' ').trim();
-      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
-
-      if (!link || text.length < 5) return;
-      const fullLink = link.startsWith('http') ? link : 'https://qatarsale.com' + link;
-      checkAndSendAlert(alerts, text, fullLink, 'Qatar Sale | قطر سيل');
-    });
-  } catch (err) {
-    console.log('⚠️ فحص قطر سيل:', err.message);
-  }
-}
-
-async function scanSooum(alerts) {
-  try {
-    const { data: html } = await axios.get('https://sooum.com', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 12000
-    });
-    const $ = cheerio.load(html);
-
-    $('a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const containerText = $(el).closest('div, article').text().replace(/\s+/g, ' ').trim();
-      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
-
-      if (!link || text.length < 5) return;
-      const fullLink = link.startsWith('http') ? link : 'https://sooum.com' + link;
-      checkAndSendAlert(alerts, text, fullLink, 'Sooum | منصة سوم');
-    });
-  } catch (err) {
-    console.log('⚠️ فحص منصة سوم:', err.message);
-  }
+  return settled.map((r, i) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : { platform: platforms[i].label, status: 0, count: 0, error: r.reason?.message || 'unknown error' }
+  );
 }
 
 function checkAndSendAlert(alerts, text, fullLink, platformName) {
+  if (alerts.length === 0) return;
   if (seenAds.has(fullLink)) return;
   const lowerText = text.toLowerCase();
 
@@ -344,26 +409,26 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
 
 // ------------------- بدء التشغيل والجدولة المستقلة -------------------
 
-// 1. تشغيل محرك الفحص فوراً وبشكل دوري كل دقيقة (مستقل تماماً)
+// 1. تشغيل محرك الفحص فوراً وبشكل دوري كل دقيقة (مستقل تماماً عن تيليجرام)
 console.log('⚡ [SYSTEM] جاري بدء تشغيل محرك رادار قطر...');
 setInterval(() => {
-  console.log('⏰ [Heartbeat] دقيقة مرت - جاري فحص المنصات الآن...');
+  console.log(`[HEARTBEAT] Scanning started at ${new Date().toISOString()}`);
   runRadarScan().catch(err => console.error('❌ خطأ في دورة الفحص:', err.message));
 }, 60000);
 
 // تشغيل أول فحص فوراً بعد 3 ثوانٍ من الإقلاع
 setTimeout(() => {
-  console.log('🚀 [RADAR] انطلاق أول جولة فحص...');
+  console.log(`[HEARTBEAT] Scanning started at ${new Date().toISOString()} (initial run)`);
   runRadarScan().catch(err => console.error('❌ خطأ في أول جولة:', err.message));
 }, 3000);
 
-// 2. تشغيل استماع التيليجرام
+// 2. تشغيل استماع التيليجرام (منفصل تماماً - لا يوقف الفحص أو الخادم إن تعطل)
 bot.launch({
   dropPendingUpdates: true
 }).then(() => {
   console.log('🤖 [TELEGRAM] البوت متصل ومستعد لاستقبال الأوامر!');
 }).catch((err) => {
-  console.error('⚠️ تحذير اتصال تليجرام:', err.message);
+  console.error('⚠️ تحذير اتصال تليجرام (409 أو انقطاع شبكة على الأرجح):', err.message);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
