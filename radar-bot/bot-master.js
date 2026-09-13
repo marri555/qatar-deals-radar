@@ -342,7 +342,7 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
   }
 }
 
-// ------------------- بدء التشغيل والجدولة -------------------
+
 // ------------------- بدء التشغيل والجدولة -------------------
 bot.launch({
   dropPendingUpdates: true
