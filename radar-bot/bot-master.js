@@ -4,7 +4,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 
-// تشغيل خادم ويب خفيف لإبقاء خدمة Render Web Service حية ومستمرة
+// ------------------- خادم الويب للحفاظ على نشاط الخدمة على Render -------------------
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -13,7 +13,7 @@ http.createServer((req, res) => {
   console.log(`🌐 Web server running on port ${PORT}`);
 });
 
-// توكن البوت (يقرأ من متغيرات البيئة أو القيمة المباشرة)
+// ------------------- إعداد البوت والملفات -------------------
 const BOT_TOKEN = process.env.BOT_TOKEN || '8858663547:AAFDhBpmaTUolGKMBfjZYhK8kcPoGhSWMm8';
 const bot = new Telegraf(BOT_TOKEN);
 
@@ -44,7 +44,7 @@ function getUserLang(chatId) {
   return users[chatId]?.lang || 'ar';
 }
 
-// قواميس النصوص باللغتين
+// ------------------- قواميس النصوص باللغتين -------------------
 const i18n = {
   ar: {
     welcome: (name) => `مرحباً بك يا <b>${name}</b> في <b>رادار قطر الذكي 🇶🇦</b>\n\nراصد آلي يرصد أحدث الإعلانات في كل المنصات القطرية لحظة بلحظة.\n\nاضغط على أي زر للبدء 👇`,
@@ -184,11 +184,13 @@ bot.on('text', (ctx) => {
   ctx.replyWithHTML(t.welcome(ctx.from.first_name || 'User'), getMenuKeyboard(lang));
 });
 
-// ------------------- محرك الفحص والمسح -------------------
+// ------------------- محرك الفحص والمسح المطور -------------------
 
 async function runRadarScan() {
   const alerts = getAlerts();
   if (alerts.length === 0) return;
+
+  console.log(`🔍 [Radar] بدء جولة فحص المنصات لـ (${alerts.length}) رادار نشط...`);
 
   await Promise.allSettled([
     scanMzadQatar(alerts),
@@ -201,79 +203,120 @@ async function runRadarScan() {
 
 async function scanMzadQatar(alerts) {
   try {
-    const { data: html } = await axios.get('https://mzadqatar.com', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data: html } = await axios.get('https://mzadqatar.com/ar', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 12000
+    });
     const $ = cheerio.load(html);
+
     $('a').each((i, el) => {
       const link = $(el).attr('href') || '';
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const containerText = $(el).closest('div, li, article').text().replace(/\s+/g, ' ').trim();
+      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
+
       if (!link || text.length < 5) return;
       const fullLink = link.startsWith('http') ? link : 'https://mzadqatar.com' + link;
       checkAndSendAlert(alerts, text, fullLink, 'Mzad Qatar | مزاد قطر');
     });
-  } catch {}
+  } catch (err) {
+    console.log('⚠️ فحص مزاد قطر:', err.message);
+  }
 }
 
 async function scanQatarLiving(alerts) {
   try {
-    const { data: html } = await axios.get('https://www.qatarliving.com/classifieds', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data: html } = await axios.get('https://www.qatarliving.com/classifieds', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 12000
+    });
     const $ = cheerio.load(html);
+
     $('a').each((i, el) => {
       const link = $(el).attr('href') || '';
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const containerText = $(el).closest('div, article').text().replace(/\s+/g, ' ').trim();
+      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
+
       if (!link || text.length < 5) return;
       const fullLink = link.startsWith('http') ? link : 'https://www.qatarliving.com' + link;
       checkAndSendAlert(alerts, text, fullLink, 'Qatar Living | قطر ليفنج');
     });
-  } catch {}
+  } catch (err) {
+    console.log('⚠️ فحص قطر ليفنج:', err.message);
+  }
 }
 
 async function scanOpenSooq(alerts) {
   try {
-    const { data: html } = await axios.get('https://qa.opensooq.com/ar', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data: html } = await axios.get('https://qa.opensooq.com/ar', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 12000
+    });
     const $ = cheerio.load(html);
+
     $('a').each((i, el) => {
       const link = $(el).attr('href') || '';
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const containerText = $(el).closest('div, li').text().replace(/\s+/g, ' ').trim();
+      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
+
       if (!link || text.length < 5) return;
       const fullLink = link.startsWith('http') ? link : 'https://qa.opensooq.com' + link;
       checkAndSendAlert(alerts, text, fullLink, 'OpenSooq | السوق المفتوح');
     });
-  } catch {}
+  } catch (err) {
+    console.log('⚠️ فحص السوق المفتوح:', err.message);
+  }
 }
 
 async function scanQatarSale(alerts) {
   try {
-    const { data: html } = await axios.get('https://qatarsale.com', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data: html } = await axios.get('https://qatarsale.com', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 12000
+    });
     const $ = cheerio.load(html);
+
     $('a').each((i, el) => {
       const link = $(el).attr('href') || '';
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const containerText = $(el).closest('div, tr, li').text().replace(/\s+/g, ' ').trim();
+      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
+
       if (!link || text.length < 5) return;
       const fullLink = link.startsWith('http') ? link : 'https://qatarsale.com' + link;
       checkAndSendAlert(alerts, text, fullLink, 'Qatar Sale | قطر سيل');
     });
-  } catch {}
+  } catch (err) {
+    console.log('⚠️ فحص قطر سيل:', err.message);
+  }
 }
 
 async function scanSooum(alerts) {
   try {
-    const { data: html } = await axios.get('https://sooum.com', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+    const { data: html } = await axios.get('https://sooum.com', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 12000
+    });
     const $ = cheerio.load(html);
+
     $('a').each((i, el) => {
       const link = $(el).attr('href') || '';
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const containerText = $(el).closest('div, article').text().replace(/\s+/g, ' ').trim();
+      const text = containerText.length > 10 ? containerText : $(el).text().replace(/\s+/g, ' ').trim();
+
       if (!link || text.length < 5) return;
       const fullLink = link.startsWith('http') ? link : 'https://sooum.com' + link;
       checkAndSendAlert(alerts, text, fullLink, 'Sooum | منصة سوم');
     });
-  } catch {}
+  } catch (err) {
+    console.log('⚠️ فحص منصة سوم:', err.message);
+  }
 }
 
 function checkAndSendAlert(alerts, text, fullLink, platformName) {
   if (seenAds.has(fullLink)) return;
   const lowerText = text.toLowerCase();
 
-  const priceMatch = text.match(/([\d,]+)\s*(ر\.ق|QAR|QR)/i);
+  // استخراج الأرقام المعبرة عن السعر إن وجدت
+  const priceMatch = text.match(/([\d,]+)\s*(ر\.ق|QAR|QR|ريال)/i);
   let adPrice = 0;
   if (priceMatch) {
     adPrice = parseInt(priceMatch[1].replace(/,/g, '')) || 0;
@@ -281,24 +324,28 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
 
   for (const alert of alerts) {
     if (lowerText.includes(alert.keyword)) {
-      if (alert.maxPrice === 0 || (adPrice > 0 && adPrice <= alert.maxPrice)) {
+      // مطابقة السعر: إذا كان الرادار لأي سعر (0) أو السعر ضمن الحد أو لم يتم التقاط رقم سعر صريح
+      const isPriceMatch = (alert.maxPrice === 0) || (adPrice > 0 && adPrice <= alert.maxPrice) || (adPrice === 0);
+
+      if (isPriceMatch) {
         seenAds.add(fullLink);
 
         const lang = alert.lang || 'ar';
-        const msg = i18n[lang].alert_msg(platformName, alert.keyword, text.slice(0, 90), adPrice, fullLink);
+        const cleanTitle = text.slice(0, 90);
+        const msg = i18n[lang].alert_msg(platformName, alert.keyword, cleanTitle, adPrice, fullLink);
 
-        bot.telegram.sendMessage(alert.chatId, msg, { parse_mode: 'HTML' });
-        console.log(`🎯 صيدة مرسلة [${platformName}] إلى (${alert.chatId})`);
+        bot.telegram.sendMessage(alert.chatId, msg, { parse_mode: 'HTML' }).catch(() => {});
+        console.log(`🎯 [صيدة ناجحة] المنصة: ${platformName} | الطلب: (${alert.keyword}) للمستخدم: ${alert.chatId}`);
         break;
       }
     }
   }
 }
 
-// تشغيل البوت
+// ------------------- بدء التشغيل والجدولة -------------------
 bot.launch().then(() => {
-  console.log('🤖 البوت ثنائي اللغة يعمل الآن بنجاح...');
-  setInterval(runRadarScan, 60000);
+  console.log('🤖 البوت ورادار الفحص يعملان الآن بنجاح...');
+  setInterval(runRadarScan, 60000); // فحص دوري كل 60 ثانية
   runRadarScan();
 });
 
