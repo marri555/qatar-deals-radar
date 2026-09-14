@@ -567,13 +567,21 @@ setTimeout(() => {
 }, 3000);
 
 // 2. تشغيل استماع التيليجرام (منفصل تماماً - لا يوقف الفحص أو الخادم إن تعطل)
-bot.launch({
-  dropPendingUpdates: true
-}).then(() => {
-  console.log('🤖 [TELEGRAM] البوت متصل ومستعد لاستقبال الأوامر!');
-}).catch((err) => {
-  console.error('⚠️ تحذير اتصال تليجرام (409 أو انقطاع شبكة على الأرجح):', err.message);
-});
+// نعيد محاولة الاتصال تلقائياً لو فشلت المحاولة الأولى (409 عابر عند تداخل
+// نشرتين، أو انقطاع شبكة لحظي) — بدون إعادة محاولة، أي فشل بالإقلاع كان يعني
+// إن البوت ما يرد على أي رسالة تليجرام إلى الأبد، رغم إن محرك الفحص يشتغل عادي.
+function launchBotWithRetry(retryDelayMs = 15000) {
+  bot.launch({
+    dropPendingUpdates: true
+  }).then(() => {
+    console.log('🤖 [TELEGRAM] البوت متصل ومستعد لاستقبال الأوامر!');
+  }).catch((err) => {
+    console.error('⚠️ تحذير اتصال تليجرام (409 أو انقطاع شبكة على الأرجح):', err.message);
+    console.log(`🔁 [TELEGRAM] إعادة محاولة الاتصال خلال ${retryDelayMs / 1000} ثانية...`);
+    setTimeout(() => launchBotWithRetry(retryDelayMs), retryDelayMs);
+  });
+}
+launchBotWithRetry();
 
 async function shutdown(signal) {
   bot.stop(signal);
