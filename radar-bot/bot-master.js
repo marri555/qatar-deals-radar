@@ -316,7 +316,10 @@ async function searchQatarLiving(keyword, alertsForKeyword) {
     const res = await axios.post('https://ql-global-search-api-prod.azurewebsites.net/v1/search', {
       q: keyword,
       filters: {},
-      sort: 'relevance',
+      // "relevance" كان يرجع نتائج بعمر أيام أحياناً بدل الأحدث فعلياً — رادار
+      // صفقات لازم يشوف الإعلان الجديد أول ما ينشر، مو "الأكثر ملاءمة" حسب
+      // خوارزمية داخلية. تأكدنا: "newest" يرجع فعلاً نتائج بنفس اليوم.
+      sort: 'newest',
       page: 1,
       page_size: 20,
       mode: 'hybrid',
