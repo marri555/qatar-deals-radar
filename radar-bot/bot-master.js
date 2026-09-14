@@ -41,6 +41,77 @@ const USERS_FILE = './users.json';
 const seenAds = new Set();
 const userState = {};
 
+// ------------------- مزامنة البيانات مع GitHub (حماية من فقدان البيانات) -------------------
+// المشكلة: قرص Render قد يكون غير دائم — أي إعادة تشغيل للحاوية (نشر جديد،
+// صيانة من Render، دورة نوم/صحيان بالخطة المجانية) ممكن يصفّر ملفات JSON
+// المحلية. بدل ما نحتاج قاعدة بيانات خارجية جديدة (حساب إضافي)، نستخدم نفس
+// مستودع GitHub الموجود أصلاً كمخزن دائم بسيط: نحفظ نسخة من كل ملف هناك بعد
+// كل تعديل، ونحمّل آخر نسخة منه عند إقلاع الخدمة قبل أي شيء ثاني.
+// اختياري تماماً: لو GITHUB_TOKEN غير موجود، كل شيء يشتغل بالملف المحلي فقط
+// بالضبط زي قبل — صفر تغيير بالسلوك الحالي لمن ما يفعّلها.
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO || 'marri555/qatar-deals-radar';
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
+
+const githubApi = GITHUB_TOKEN
+  ? axios.create({
+      baseURL: `https://api.github.com/repos/${GITHUB_REPO}/contents`,
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json'
+      },
+      timeout: 10000,
+      validateStatus: () => true
+    })
+  : null;
+
+// يحمّل أحدث نسخة من GitHub ويكتبها بالملف المحلي — يُستدعى مرة وحدة وقت
+// الإقلاع فقط، قبل ما أي كود ثاني يقرأ الملفات المحلية.
+async function loadJsonFromGitHubIfConfigured(repoPath, localPath) {
+  if (!githubApi) return;
+  try {
+    const res = await githubApi.get(`/${repoPath}`, { params: { ref: GITHUB_BRANCH } });
+    if (res.status === 200 && res.data?.content) {
+      const content = Buffer.from(res.data.content, 'base64').toString('utf-8');
+      fs.writeFileSync(localPath, content);
+      console.log(`✅ [GitHub Sync] تم تحميل ${repoPath} من GitHub (استعادة آخر نسخة محفوظة).`);
+    } else if (res.status === 404) {
+      console.log(`ℹ️ [GitHub Sync] ${repoPath} غير موجود على GitHub بعد — بنبدأ بالملف المحلي الحالي.`);
+    } else {
+      console.log(`⚠️ [GitHub Sync] فشل تحميل ${repoPath} (HTTP ${res.status}) — بنكمل بالملف المحلي الحالي.`);
+    }
+  } catch (err) {
+    console.log(`⚠️ [GitHub Sync] خطأ تحميل ${repoPath}:`, err.message, '— بنكمل بالملف المحلي الحالي.');
+  }
+}
+
+// يرفع نسخة الملف المحلي الحالية لـ GitHub — يُستدعى بالخلفية (بدون انتظار)
+// بعد كل حفظ محلي، فما يأخّر أي رد للمستخدم على تيليجرام.
+async function saveJsonToGitHubIfConfigured(repoPath, localPath, commitMessage) {
+  if (!githubApi) return;
+  try {
+    const content = fs.readFileSync(localPath, 'utf-8');
+    const encoded = Buffer.from(content).toString('base64');
+
+    let sha;
+    const getRes = await githubApi.get(`/${repoPath}`, { params: { ref: GITHUB_BRANCH } });
+    if (getRes.status === 200) sha = getRes.data.sha;
+
+    const putRes = await githubApi.put(`/${repoPath}`, {
+      message: commitMessage,
+      content: encoded,
+      branch: GITHUB_BRANCH,
+      ...(sha ? { sha } : {})
+    });
+
+    if (putRes.status < 200 || putRes.status >= 300) {
+      console.log(`⚠️ [GitHub Sync] فشل حفظ ${repoPath} (HTTP ${putRes.status}):`, JSON.stringify(putRes.data).slice(0, 200));
+    }
+  } catch (err) {
+    console.log(`⚠️ [GitHub Sync] خطأ حفظ ${repoPath}:`, err.message);
+  }
+}
+
 // قراءة وحفظ التنبيهات
 function getAlerts() {
   if (!fs.existsSync(DB_FILE)) return [];
@@ -48,6 +119,7 @@ function getAlerts() {
 }
 function saveAlerts(alerts) {
   fs.writeFileSync(DB_FILE, JSON.stringify(alerts, null, 2));
+  saveJsonToGitHubIfConfigured('radar-bot/user_alerts.json', DB_FILE, 'chore: sync user_alerts.json').catch(() => {});
 }
 
 // قراءة وحفظ إعدادات المستخدمين ولغاتهم
@@ -57,6 +129,7 @@ function getUsers() {
 }
 function saveUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  saveJsonToGitHubIfConfigured('radar-bot/users.json', USERS_FILE, 'chore: sync users.json').catch(() => {});
 }
 function getUserLang(chatId) {
   const users = getUsers();
@@ -664,8 +737,16 @@ function dispatchMatches(alerts, listings, platformName) {
 
 // ------------------- بدء التشغيل والجدولة المستقلة -------------------
 
-// 1. تشغيل محرك الفحص فوراً وبشكل دوري كل دقيقة (مستقل تماماً عن تيليجرام)
 console.log('⚡ [SYSTEM] جاري بدء تشغيل محرك رادار قطر...');
+
+// نسترجع آخر نسخة محفوظة من GitHub (لو مفعّلة) قبل أي شيء ثاني — لو الحاوية
+// انصفرت (نشر جديد، إعادة تشغيل من Render...)، نرجع ببيانات المستخدمين
+// الحقيقية بدل ما نبدأ فاضين. لا تأثير على خادم الويب (يستجيب فوراً أصلاً
+// قبل هذا السطر) ولا خطر تعليق — أي فشل هنا يُسجَّل ويكمل بالملف المحلي.
+await loadJsonFromGitHubIfConfigured('radar-bot/user_alerts.json', DB_FILE);
+await loadJsonFromGitHubIfConfigured('radar-bot/users.json', USERS_FILE);
+
+// 1. تشغيل محرك الفحص فوراً وبشكل دوري كل دقيقة (مستقل تماماً عن تيليجرام)
 setInterval(() => {
   console.log(`[HEARTBEAT] Scanning started at ${new Date().toISOString()}`);
   runRadarScan().catch(err => console.error('❌ خطأ في دورة الفحص:', err.message));
