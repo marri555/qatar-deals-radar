@@ -305,8 +305,9 @@ function buildListingText(title, priceText) {
 
 // Qatar Living: API بحث نظيف مستقل تماماً عن الموقع الرئيسي (Azure)، بدون أي
 // حماية Cloudflare وبدون حاجة لمتصفح حقيقي.
-async function searchQatarLiving(keyword) {
+async function searchQatarLiving(keyword, alertsForKeyword) {
   const logTag = 'QatarLiving';
+  const label = 'Qatar Living | قطر ليفنج';
   try {
     const res = await axios.post('https://ql-global-search-api-prod.azurewebsites.net/v1/search', {
       q: keyword,
@@ -338,6 +339,11 @@ async function searchQatarLiving(keyword) {
     }));
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    // نرسل التنبيه فوراً بمجرد جهوزية نتائج هذه المنصة، بدون انتظار بقية
+    // المنصات (خصوصاً مزاد قطر الأبطأ بسبب المتصفح الحقيقي).
+    for (const { text, link } of listings) {
+      checkAndSendAlert(alertsForKeyword, text, link, label);
+    }
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -347,8 +353,9 @@ async function searchQatarLiving(keyword) {
 
 // Qatar Sale: نفس الفكرة — API بحث نظيف (production-api.yousale.com، منصة
 // yousale التي تُشغّل قطر سيل) منفصل عن الموقع المحمي بـ Cloudflare.
-async function searchQatarSale(keyword) {
+async function searchQatarSale(keyword, alertsForKeyword) {
   const logTag = 'QatarSale';
+  const label = 'Qatar Sale | قطر سيل';
   try {
     const res = await axios.post('https://production-api.yousale.com/api/v2/Products', {
       url: `/ar/products?key=${encodeURIComponent(keyword)}`,
@@ -379,6 +386,9 @@ async function searchQatarSale(keyword) {
     }));
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    for (const { text, link } of listings) {
+      checkAndSendAlert(alertsForKeyword, text, link, label);
+    }
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -388,8 +398,9 @@ async function searchQatarSale(keyword) {
 
 // OpenSooq: صفحة نتائج البحث فعلياً SSR (Server-Side Rendered) — لا حاجة لمتصفح
 // حقيقي ولا حماية Cloudflare تمنعها، axios+cheerio كافيان.
-async function searchOpenSooq(keyword) {
+async function searchOpenSooq(keyword, alertsForKeyword) {
   const logTag = 'OpenSooq';
+  const label = 'OpenSooq | السوق المفتوح';
   try {
     const url = `https://qa.opensooq.com/ar/find?term=${encodeURIComponent(keyword)}&search=true`;
     const res = await httpClient.get(url);
@@ -407,6 +418,9 @@ async function searchOpenSooq(keyword) {
     });
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    for (const { text, link } of listings) {
+      checkAndSendAlert(alertsForKeyword, text, link, label);
+    }
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -415,9 +429,12 @@ async function searchOpenSooq(keyword) {
 }
 
 // Mzad Qatar: المنصة الوحيدة التي احتاجت متصفح حقيقي (Puppeteer + Stealth) —
-// محمية بـ Cloudflare حقيقي على صفحاتها، ونتائج البحث نفسها SPA (Vue).
-async function searchMzadQatar(keyword) {
+// محمية بـ Cloudflare حقيقي على صفحاتها، ونتائج البحث نفسها SPA (Vue). هذه
+// المنصة هي الأبطأ دائماً (متصفح حقيقي) — لهذا كل منصة ترسل تنبيهها فوراً
+// بمجرد جهوزيتها بدل انتظار مزاد قطر.
+async function searchMzadQatar(keyword, alertsForKeyword) {
   const logTag = 'Mzad';
+  const label = 'Mzad Qatar | مزاد قطر';
   try {
     const url = `https://mzadqatar.com/search_tags?productId=0&searchStr=${encodeURIComponent(keyword)}`;
     const { html, status } = await fetchRenderedHtml(url);
@@ -437,6 +454,9 @@ async function searchMzadQatar(keyword) {
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${status}, rendered)`);
     if (status === 403 && listings.length === 0) {
       console.log(`⚠️ [${logTag}] محجوب حتى مع متصفح حقيقي (Cloudflare متقدم) — يحتاج خدمة Anti-bot مدفوعة لتجاوزه.`);
+    }
+    for (const { text, link } of listings) {
+      checkAndSendAlert(alertsForKeyword, text, link, label);
     }
     return { listings, status, error: null };
   } catch (err) {
@@ -484,8 +504,11 @@ async function runRadarScan(forceKeyword = null) {
     for (const keyword of uniqueKeywords) {
       const alertsForKeyword = alerts.filter((a) => a.keyword === keyword);
 
+      // كل دالة بحث ترسل تنبيهاتها بنفسها فور جهوزية نتائجها (داخل الدالة
+      // نفسها) — هنا فقط نجمع الأرقام للتشخيص/الـ testscan، وما ننتظر أبطأ
+      // منصة (مزاد قطر) قبل ما نطابق نتائج البقية.
       const settled = await Promise.allSettled(
-        PLATFORM_SEARCHERS.map((p) => p.search(keyword))
+        PLATFORM_SEARCHERS.map((p) => p.search(keyword, alertsForKeyword))
       );
 
       settled.forEach((r, i) => {
@@ -494,9 +517,6 @@ async function runRadarScan(forceKeyword = null) {
 
         if (r.status === 'fulfilled') {
           const { listings, status, error } = r.value;
-          for (const { text, link } of listings) {
-            checkAndSendAlert(alertsForKeyword, text, link, label);
-          }
           aggregated.set(label, { status, count: prev.count + listings.length, error: error || prev.error });
         } else {
           aggregated.set(label, { status: prev.status, count: prev.count, error: r.reason?.message || 'unknown error' });
