@@ -382,13 +382,16 @@ async function searchQatarSale(keyword, alertsForKeyword) {
     });
 
     const list = res.data?.list || [];
-    // رابط صفحة نتائج البحث نفسها (وليس رابط إعلان مباشر — لم نتحقق من نمط
-    // رابط الإعلان الفردي الحقيقي)، يوصل المستخدم لنفس النتيجة على الموقع الحقيقي.
-    const searchPageLink = `https://qatarsale.com/ar/products?key=${encodeURIComponent(keyword)}`;
-    const listings = list.map((p) => ({
-      text: buildListingText(p.title, p.startingPrice ? `${p.startingPrice.toLocaleString()} QAR` : ''),
-      link: searchPageLink
-    }));
+    // خطأ حقيقي سابق: كنا نستخدم رابط صفحة نتائج البحث نفسه لكل الإعلانات —
+    // بما إن نتائج البحث تتغيّر، المستخدم يضغط الرابط ويطلع له إعلان عشوائي
+    // مختلف كلياً (صار فعلياً: تنبيه سيارة يوجّه لإعلان ساعة). الرابط الصحيح
+    // لكل إعلان هو /ar/product/{uri} — تحققنا منه مباشرة من HTML الموقع الحقيقي.
+    const listings = list
+      .filter((p) => p.uri)
+      .map((p) => ({
+        text: buildListingText(p.title, p.startingPrice ? `${p.startingPrice.toLocaleString()} QAR` : ''),
+        link: `https://qatarsale.com/ar/product/${p.uri}`
+      }));
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
     dispatchMatches(alertsForKeyword, listings, label);
