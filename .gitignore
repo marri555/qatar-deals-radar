@@ -1,2 +1,4 @@
 node_modules
 .env
+radar-bot/user_alerts.json
+radar-bot/users.json
