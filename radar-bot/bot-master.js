@@ -75,7 +75,7 @@ const i18n = {
     btn_list: '📋 راداراتي النشطة',
     btn_clear: '🗑️ مسح الرادارات',
     btn_lang: '🌐 Change Language / تغيير اللغة',
-    ask_keyword: '🔎 اكتب اسم السلعة التي تبحث عنها:\n(مثال: لاندكروزر، لوحة سيارة، رولكس، شقة، بلايستيشن)',
+    ask_keyword: '🔎 اكتب اسم السلعة التي تبحث عنها:\n(مثال: لاندكروزر، لوحة سيارة، رولكس، شقة، بلايستيشن)\n\n💡 تقدر تكتب أكثر من صيغة للكلمة نفسها مفصولة بفاصلة، عشان ما تفوتك إعلانات بصيغة مختلفة:\nمثال: كرسي مكتب, كراسي مكتب',
     ask_price: (kw) => `ممتاز! المطلوب: "${kw}".\n\n💰 اكتب الحد الأقصى للسعر بالريال (أو أرسل 0 لأي سعر):`,
     alert_created: (kw, price) => `✅ <b>تم تفعيل الرادار!</b>\n\n🎯 <b>السلعة:</b> ${kw}\n💰 <b>السعر الأقصى:</b> ${price === 0 ? 'أي سعر' : price.toLocaleString() + ' ر.ق'}\n\nسننبهك فور نزول أي إعلان مطابق! 🚀`,
     no_alerts: '⚠️ ليس لديك أي رادارات نشطة حالياً.',
@@ -97,7 +97,7 @@ const i18n = {
     btn_list: '📋 My Active Radars',
     btn_clear: '🗑️ Clear All',
     btn_lang: '🌐 تغيير اللغة / Change Language',
-    ask_keyword: '🔎 Enter the item/keyword you want to track:\n(e.g., Land Cruiser, Plate number, Rolex, Villa, iPhone)',
+    ask_keyword: '🔎 Enter the item/keyword you want to track:\n(e.g., Land Cruiser, Plate number, Rolex, Villa, iPhone)\n\n💡 You can enter multiple spellings/forms of the same word separated by a comma, so you don\'t miss listings phrased differently:\ne.g.: office chair, office chairs',
     ask_price: (kw) => `Great! Tracking: "${kw}".\n\n💰 Enter max price in QAR (or send 0 for any price):`,
     alert_created: (kw, price) => `✅ <b>Radar Activated!</b>\n\n🎯 <b>Item:</b> ${kw}\n💰 <b>Max Price:</b> ${price === 0 ? 'Any price' : price.toLocaleString() + ' QAR'}\n\nYou will be notified instantly when a match is found! 🚀`,
     no_alerts: '⚠️ You have no active radars currently.',
@@ -167,7 +167,7 @@ bot.action('ACTION_LIST', (ctx) => {
 
   let msg = t.my_alerts_title;
   myAlerts.forEach((item, i) => {
-    msg += `${i + 1}. 🎯 ${item.keyword} | 💰 ${item.maxPrice > 0 ? item.maxPrice.toLocaleString() + ' QAR' : (lang === 'ar' ? 'أي سعر' : 'Any')}\n`;
+    msg += `${i + 1}. 🎯 ${getAlertKeywords(item).join(' / ')} | 💰 ${item.maxPrice > 0 ? item.maxPrice.toLocaleString() + ' QAR' : (lang === 'ar' ? 'أي سعر' : 'Any')}\n`;
   });
 
   ctx.replyWithHTML(msg, getMenuKeyboard(lang));
@@ -213,9 +213,11 @@ bot.on('text', (ctx) => {
   const text = ctx.message.text.trim();
 
   if (state && state.step === 'WAITING_KEYWORD') {
-    state.keyword = text;
+    // يدعم أكثر من صيغة لنفس الكلمة مفصولة بفاصلة (مثلاً: "كرسي مكتب, كراسي مكتب")
+    const keywords = text.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
+    state.keywords = keywords;
     state.step = 'WAITING_PRICE';
-    return ctx.reply(t.ask_price(text));
+    return ctx.reply(t.ask_price(keywords.join(' / ')));
   }
 
   if (state && state.step === 'WAITING_PRICE') {
@@ -226,7 +228,7 @@ bot.on('text', (ctx) => {
       id: Date.now(),
       chatId: chatId,
       lang: lang,
-      keyword: state.keyword.toLowerCase(),
+      keywords: state.keywords,
       maxPrice: rawPrice,
       createdAt: new Date().toISOString()
     };
@@ -235,7 +237,7 @@ bot.on('text', (ctx) => {
     saveAlerts(allAlerts);
     delete userState[chatId];
 
-    return ctx.replyWithHTML(t.alert_created(newAlert.keyword, rawPrice), getMenuKeyboard(lang));
+    return ctx.replyWithHTML(t.alert_created(newAlert.keywords.join(' / '), rawPrice), getMenuKeyboard(lang));
   }
 
   // إذا لم يكن المستخدم قد اختار لغة بعد
@@ -498,15 +500,17 @@ async function runRadarScan(forceKeyword = null) {
       return [];
     }
 
-    // نبحث لكل كلمة مفتاحية فريدة مرة واحدة فقط (حتى لو عدة مستخدمين يشتركون
-    // بنفس الكلمة)، ونطابق النتائج مع كل رادار له نفس الكلمة. لو ما فيه رادارات
-    // حقيقية (مثلاً استدعاء تشخيصي من /testscan) نستخدم forceKeyword فقط
-    // للتحقق من وصول المنصات، بدون إرسال أي تنبيه فعلي لأحد.
-    const uniqueKeywords = alerts.length > 0 ? [...new Set(alerts.map((a) => a.keyword))] : [forceKeyword];
+    // نبحث لكل صيغة/كلمة فريدة مرة واحدة فقط (حتى لو عدة رادارات تشترك بنفس
+    // الصيغة، أو رادار واحد له أكثر من صيغة)، ونطابق النتائج مع كل رادار يحمل
+    // هذه الصيغة ضمن صيغه. لو ما فيه رادارات حقيقية (مثلاً استدعاء تشخيصي من
+    // /testscan) نستخدم forceKeyword فقط للتحقق من وصول المنصات، بدون إرسال
+    // أي تنبيه فعلي لأحد.
+    const allKeywords = alerts.flatMap((a) => getAlertKeywords(a));
+    const uniqueKeywords = alerts.length > 0 ? [...new Set(allKeywords)] : [forceKeyword];
     const aggregated = new Map(); // platformLabel -> { status, count, error }
 
     for (const keyword of uniqueKeywords) {
-      const alertsForKeyword = alerts.filter((a) => a.keyword === keyword);
+      const alertsForKeyword = alerts.filter((a) => getAlertKeywords(a).includes(keyword));
 
       // كل دالة بحث ترسل تنبيهاتها بنفسها فور جهوزية نتائجها (داخل الدالة
       // نفسها) — هنا فقط نجمع الأرقام للتشخيص/الـ testscan، وما ننتظر أبطأ
@@ -543,8 +547,17 @@ function buildKeywordMatcher(keyword) {
   return new RegExp(`(?<![\\u0600-\\u06FF])${escaped}(?![\\u0600-\\u06FF])`, 'i');
 }
 
+// رادار واحد ممكن يحمل أكثر من صيغة لنفس الكلمة (مثلاً "كرسي مكتب" و"كراسي
+// مكتب") — يدعم التوافق مع الرادارات القديمة اللي مخزّنة بحقل keyword مفرد.
+function getAlertKeywords(alert) {
+  if (Array.isArray(alert.keywords) && alert.keywords.length) return alert.keywords;
+  if (alert.keyword) return [alert.keyword];
+  return [];
+}
+
 // يرجع كل الرادارات المطابقة لإعلان واحد (مو أول واحد بس) — عشان لو أكثر من
 // مستخدم مشترك بنفس الكلمة، الكل يوصله تنبيهه، مو أول واحد بالقائمة فقط.
+// كل رادار يُطابَق إذا كانت أي صيغة من صيغه موجودة بالنص.
 function findMatchingAlerts(alerts, text) {
   const lowerText = text.toLowerCase();
 
@@ -557,10 +570,11 @@ function findMatchingAlerts(alerts, text) {
 
   const matches = [];
   for (const alert of alerts) {
-    if (!buildKeywordMatcher(alert.keyword).test(lowerText)) continue;
+    const matchedKeyword = getAlertKeywords(alert).find((kw) => buildKeywordMatcher(kw).test(lowerText));
+    if (!matchedKeyword) continue;
     // مطابقة السعر: إذا كان الرادار لأي سعر (0) أو السعر ضمن الحد أو لم يتم التقاط رقم سعر صريح
     const isPriceMatch = (alert.maxPrice === 0) || (adPrice > 0 && adPrice <= alert.maxPrice) || (adPrice === 0);
-    if (isPriceMatch) matches.push({ alert, adPrice });
+    if (isPriceMatch) matches.push({ alert, adPrice, matchedKeyword });
   }
   return matches;
 }
@@ -583,10 +597,10 @@ function dispatchMatches(alerts, listings, platformName) {
     seenAds.add(link);
     const cleanTitle = text.slice(0, 90);
 
-    for (const { alert, adPrice } of matches) {
+    for (const { alert, adPrice, matchedKeyword } of matches) {
       const lang = alert.lang || 'ar';
       if (!itemsByChat.has(alert.chatId)) itemsByChat.set(alert.chatId, { lang, items: [] });
-      itemsByChat.get(alert.chatId).items.push({ keyword: alert.keyword, text: cleanTitle, price: adPrice, link });
+      itemsByChat.get(alert.chatId).items.push({ keyword: matchedKeyword, text: cleanTitle, price: adPrice, link });
     }
   }
 
