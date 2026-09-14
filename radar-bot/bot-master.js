@@ -297,7 +297,9 @@ async function fetchRenderedHtml(url) {
       url,
       mode: 'auto'
     },
-    timeout: 90000,
+    // شفنا فعلياً بلوحة ZenRows طلب نجح على 89.4 ثانية وانقطع عندنا بالخطأ لأن
+    // مهلتنا كانت بالضبط 90 ثانية — قريب جداً. رفعناها لهامش أمان حقيقي.
+    timeout: 140000,
     validateStatus: () => true
   });
 
