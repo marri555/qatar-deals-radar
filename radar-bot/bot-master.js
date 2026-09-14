@@ -306,7 +306,10 @@ let browserInstance = null;
 let chromeInstallAttempted = false;
 
 async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) return browserInstance;
+  // ملاحظة: كائن المتصفح اللي يرجعه puppeteer-extra (مع stealth) ما يعرض
+  // isConnected() كدالة — بس خاصية connected مباشرة. استخدام isConnected()
+  // هنا كان يرمي "is not a function" ويفشّل كل محاولة تالية بعد أول إطلاق ناجح.
+  if (browserInstance && browserInstance.connected) return browserInstance;
 
   try {
     browserInstance = await launchBrowser();
