@@ -217,7 +217,9 @@ bot.on('text', (ctx) => {
 
   if (state && state.step === 'WAITING_KEYWORD') {
     // يدعم أكثر من صيغة لنفس الكلمة مفصولة بفاصلة (مثلاً: "كرسي مكتب, كراسي مكتب")
-    const keywords = text.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
+    // نقبل الفاصلة الإنجليزية "," والفاصلة العربية "،" لأن لوحة المفاتيح
+    // العربية تكتب فاصلة عربية افتراضياً وليست نفس رمز الفاصلة الإنجليزية
+    const keywords = text.split(/[,،]/).map((k) => k.trim().toLowerCase()).filter(Boolean);
     state.keywords = keywords;
     state.step = 'WAITING_PRICE';
     return ctx.reply(t.ask_price(keywords.join(' / ')));
@@ -318,8 +320,12 @@ async function getBrowser() {
         await installChromeForPuppeteer();
         browserInstance = await launchBrowser();
       } catch (installErr) {
-        console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', installErr.message);
-        throw err; // نرمي الخطأ الأصلي الواضح بدل خطأ التثبيت
+        // نطبع stderr/stdout الفعلي لعملية التثبيت (لو موجود) — السبب الحقيقي
+        // للفشل (صلاحيات، شبكة، مساحة قرص...) عادة يكون فيه لا برسالة الخطأ
+        // العامة فقط، عشان يظهر مباشرة بـ /testscan بدون الحاجة نبحث باللوقات.
+        const detail = installErr.stderr || installErr.stdout || installErr.message;
+        console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', detail);
+        throw new Error(`Chrome auto-install failed: ${detail}`);
       }
     } else {
       throw err;
