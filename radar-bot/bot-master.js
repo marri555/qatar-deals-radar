@@ -510,6 +510,15 @@ async function runRadarScan(forceKeyword = null) {
   }
 }
 
+// مطابقة الكلمة المفتاحية كوحدة كاملة، مو كجزء من كلمة أطول. مشكلة حقيقية
+// واجهناها: "لوحة ثلاثي" (لوحة سيارة) طابقت خطأً "لوحة ثلاثية الأبعاد" (لوحة
+// جدارية ديكور) لأن العربية ما تفصل الكلمة عن لاحقتها بمسافة — "ثلاثي" فعلياً
+// جزء حرفي من "ثلاثية". نمنع ذلك برفض أي تطابق ملتصق بحرف عربي آخر قبله أو بعده.
+function buildKeywordMatcher(keyword) {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\u0600-\\u06FF])${escaped}(?![\\u0600-\\u06FF])`, 'i');
+}
+
 function checkAndSendAlert(alerts, text, fullLink, platformName) {
   if (alerts.length === 0) return;
   if (seenAds.has(fullLink)) return;
@@ -523,7 +532,7 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
   }
 
   for (const alert of alerts) {
-    if (lowerText.includes(alert.keyword)) {
+    if (buildKeywordMatcher(alert.keyword).test(lowerText)) {
       // مطابقة السعر: إذا كان الرادار لأي سعر (0) أو السعر ضمن الحد أو لم يتم التقاط رقم سعر صريح
       const isPriceMatch = (alert.maxPrice === 0) || (adPrice > 0 && adPrice <= alert.maxPrice) || (adPrice === 0);
 
