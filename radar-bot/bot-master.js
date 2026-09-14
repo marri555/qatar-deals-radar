@@ -422,10 +422,15 @@ async function searchQatarLiving(keyword, alertsForKeyword) {
     });
 
     const results = res.data?.results || [];
-    const listings = results.map((r) => ({
-      text: buildListingText(r.title, r.price ? `${r.price} ${r.price_type || 'QAR'}` : ''),
-      link: `https://www.qatarliving.com/en/classifieds/items/${r.slug}`
-    }));
+    // مشكلة حقيقية واجهناها: تنبيه وصل لإعلان مباع فعلياً — الـ API يرجع أحياناً
+    // إعلانات قديمة/مباعة ضمن نتائج البحث. الحقول is_active/is_sold موجودة
+    // بالرد أصلاً، بس ما كنا نستخدمها للتصفية.
+    const listings = results
+      .filter((r) => r.is_active !== false && r.is_sold !== true)
+      .map((r) => ({
+        text: buildListingText(r.title, r.price ? `${r.price} ${r.price_type || 'QAR'}` : ''),
+        link: `https://www.qatarliving.com/en/classifieds/items/${r.slug}`
+      }));
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
     // نرسل التنبيه فوراً بمجرد جهوزية نتائج هذه المنصة، بدون انتظار بقية
@@ -468,8 +473,11 @@ async function searchQatarSale(keyword, alertsForKeyword) {
     // بما إن نتائج البحث تتغيّر، المستخدم يضغط الرابط ويطلع له إعلان عشوائي
     // مختلف كلياً (صار فعلياً: تنبيه سيارة يوجّه لإعلان ساعة). الرابط الصحيح
     // لكل إعلان هو /ar/product/{uri} — تحققنا منه مباشرة من HTML الموقع الحقيقي.
+    // نفس مشكلة الإعلانات المباعة — تحققنا فعلياً: isActive يرجع false حتى على
+    // إعلانات حية وشغالة (ما يعني اللي افترضناه)، فاستبعدناه من الفلترة تجنباً
+    // لاستبعاد كل النتائج غلط. isSold/isExpired/isDeleted تحققنا إنها موثوقة.
     const listings = list
-      .filter((p) => p.uri)
+      .filter((p) => p.uri && !p.isSold && !p.isExpired && !p.isDeleted)
       .map((p) => ({
         text: buildListingText(p.title, p.startingPrice ? `${p.startingPrice.toLocaleString()} QAR` : ''),
         link: `https://qatarsale.com/ar/product/${p.uri}`
