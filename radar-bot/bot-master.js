@@ -4,13 +4,6 @@ import { Telegraf, Markup } from 'telegraf';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
-puppeteer.use(StealthPlugin());
 
 // ------------------- خادم الويب للحفاظ على نشاط الخدمة على Render -------------------
 const PORT = process.env.PORT || 10000;
@@ -279,98 +272,29 @@ const httpClient = axios.create({
   validateStatus: () => true
 });
 
-// ------------------- متصفح حقيقي (Puppeteer) للمنصات المحمية بـ JS/Cloudflare -------------------
-// نستخدم نسخة واحدة مشتركة من المتصفح (بدل فتح متصفح جديد كل دورة فحص) لتقليل
-// استهلاك الذاكرة على Render. لو فشل الإطلاق (مثلاً مكتبات نظام ناقصة) نسجل الخطأ
-// وما نوقف بقية النظام.
-const PUPPETEER_LAUNCH_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
-
-function launchBrowser() {
-  return puppeteer.launch({ headless: 'new', args: PUPPETEER_LAUNCH_ARGS });
-}
-
-// تثبيت ذاتي لمتصفح Chrome عند الحاجة: بعض بيئات النشر (زي Render) لا تُشغّل
-// postinstall/build command المتوقع بشكل موثوق، فبدل ما نعتمد على إعدادات
-// النشر الخارجية، نتحقق ونثبّت وقت التشغيل الفعلي مباشرة — يشتغل بغض النظر
-// عن إعدادات لوحة Render.
-async function installChromeForPuppeteer() {
-  console.log('🔧 [Puppeteer] تثبيت Chrome تلقائياً (أول مرة فقط، قد يأخذ دقيقة تقريباً)...');
-  // نستخدم exec (عبر shell) مو execFile — npx على بعض الأنظمة (وWindows دائماً)
-  // هو ملف .cmd/سكربت غلاف، وexecFile المباشر يفشل بخطأ ENOENT لأنه ما يحله
-  // عبر PATH صح. الأمر ثابت وما فيه أي مدخلات مستخدم، فما فيه خطر حقن أوامر.
-  await execAsync('npx puppeteer browsers install chrome', { timeout: 120000 });
-  console.log('✅ [Puppeteer] تم تثبيت Chrome بنجاح.');
-}
-
-let browserInstance = null;
-let chromeInstallAttempted = false;
-
-// مقفل إطلاق بسيط: لو عدة كلمات مفتاحية تحتاج المتصفح بنفس اللحظة (بعد ما
-// صرنا نبحث عن كل الكلمات بالتوازي)، الكل ينتظر نفس عملية الإطلاق بدل ما كل
-// واحدة تطلق متصفح Chrome منفصل لحالها (يستهلك ذاكرة مضاعفة بلا داعي).
-let launchingPromise = null;
-
-async function getBrowser() {
-  // ملاحظة: كائن المتصفح اللي يرجعه puppeteer-extra (مع stealth) ما يعرض
-  // isConnected() كدالة — بس خاصية connected مباشرة. استخدام isConnected()
-  // هنا كان يرمي "is not a function" ويفشّل كل محاولة تالية بعد أول إطلاق ناجح.
-  if (browserInstance && browserInstance.connected) return browserInstance;
-  if (launchingPromise) return launchingPromise;
-
-  launchingPromise = (async () => {
-    let browser;
-    try {
-      browser = await launchBrowser();
-    } catch (err) {
-      const isMissingChrome = /Could not find Chrome/i.test(err.message);
-      // ما نكرر محاولة التثبيت كل دورة فحص لو فشلت مرة (تجنّب تعليق متكرر لكل
-      // دورة على نفس الخطأ)، بس نجربها مرة وحدة فعلية أول ما تصير المشكلة.
-      if (isMissingChrome && !chromeInstallAttempted) {
-        chromeInstallAttempted = true;
-        try {
-          await installChromeForPuppeteer();
-          browser = await launchBrowser();
-        } catch (installErr) {
-          // نطبع stderr/stdout الفعلي لعملية التثبيت (لو موجود) — السبب الحقيقي
-          // للفشل (صلاحيات، شبكة، مساحة قرص...) عادة يكون فيه لا برسالة الخطأ
-          // العامة فقط، عشان يظهر مباشرة بـ /testscan بدون الحاجة نبحث باللوقات.
-          const detail = installErr.stderr || installErr.stdout || installErr.message;
-          console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', detail);
-          throw new Error(`Chrome auto-install failed: ${detail}`);
-        }
-      } else {
-        throw err;
-      }
-    }
-
-    browser.on('disconnected', () => { browserInstance = null; });
-    browserInstance = browser;
-    return browser;
-  })();
-
-  try {
-    return await launchingPromise;
-  } finally {
-    launchingPromise = null;
-  }
-}
-
+// ------------------- ZenRows للمنصات المحمية بـ JS/Cloudflare -------------------
+// استبدلنا متصفح Puppeteer المحلي بخدمة ZenRows المدفوعة (كانت المنصة الوحيدة
+// اللي تحتاجه هي مزاد قطر). ZenRows يسوي التصيير (JS rendering) وتجاوز
+// Cloudflare سوا من طرفهم، فما نحتاج نثبّت أو نشغّل متصفح حقيقي على Render
+// إطلاقاً — يشيل هم الذاكرة ومشاكل تثبيت Chrome بالكامل.
 async function fetchRenderedHtml(url) {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-  try {
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'ar-QA,ar;q=0.9,en-US;q=0.8,en;q=0.7' });
-    await page.setViewport({ width: 1366, height: 900 });
-    const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
-    const status = response ? response.status() : 0;
-    // فرصة إضافية بسيطة لأي محتوى يتحمّل بعد حدث التحميل الأساسي
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const html = await page.content();
-    return { html, status };
-  } finally {
-    await page.close().catch(() => {});
+  const apiKey = process.env.ZENROWS_API_KEY;
+  if (!apiKey) {
+    throw new Error('ZENROWS_API_KEY غير موجود في متغيرات البيئة — أضفه في .env محلياً وفي Render → Environment');
   }
+
+  const response = await axios.get('https://api.zenrows.com/v1/', {
+    params: {
+      apikey: apiKey,
+      url,
+      js_render: 'true',
+      premium_proxy: 'true'
+    },
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  return { html: response.data || '', status: response.status };
 }
 
 // ------------------- بحث حقيقي لكل منصة (لا نمسح الصفحة الرئيسية أبداً) -------------------
@@ -502,10 +426,9 @@ async function searchOpenSooq(keyword, alertsForKeyword) {
   }
 }
 
-// Mzad Qatar: المنصة الوحيدة التي احتاجت متصفح حقيقي (Puppeteer + Stealth) —
-// محمية بـ Cloudflare حقيقي على صفحاتها، ونتائج البحث نفسها SPA (Vue). هذه
-// المنصة هي الأبطأ دائماً (متصفح حقيقي) — لهذا كل منصة ترسل تنبيهها فوراً
-// بمجرد جهوزيتها بدل انتظار مزاد قطر.
+// Mzad Qatar: المنصة الوحيدة المحمية بـ Cloudflare حقيقي وSPA (Vue) بنفس الوقت،
+// فنمرر طلبها عبر ZenRows (تصيير JS + تجاوز Cloudflare من طرفهم). أبطأ منصة
+// دائماً بسبب هذا — لهذا كل منصة ترسل تنبيهها فوراً بمجرد جهوزيتها بدل انتظارها.
 async function searchMzadQatar(keyword, alertsForKeyword) {
   const logTag = 'Mzad';
   const label = 'Mzad Qatar | مزاد قطر';
@@ -525,9 +448,9 @@ async function searchMzadQatar(keyword, alertsForKeyword) {
       listings.push({ text, link: href.startsWith('http') ? href : 'https://mzadqatar.com' + href });
     });
 
-    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${status}, rendered)`);
+    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${status}, via ZenRows)`);
     if (status === 403 && listings.length === 0) {
-      console.log(`⚠️ [${logTag}] محجوب حتى مع متصفح حقيقي (Cloudflare متقدم) — يحتاج خدمة Anti-bot مدفوعة لتجاوزه.`);
+      console.log(`⚠️ [${logTag}] لا يزال محجوباً حتى مع ZenRows — راجع إعدادات الخطة/الـ premium_proxy.`);
     }
     dispatchMatches(alertsForKeyword, listings, label);
     return { listings, status, error: null };
@@ -718,9 +641,6 @@ launchBotWithRetry();
 
 async function shutdown(signal) {
   bot.stop(signal);
-  if (browserInstance) {
-    await browserInstance.close().catch(() => {});
-  }
 }
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
