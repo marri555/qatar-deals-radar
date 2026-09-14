@@ -305,38 +305,54 @@ async function installChromeForPuppeteer() {
 let browserInstance = null;
 let chromeInstallAttempted = false;
 
+// مقفل إطلاق بسيط: لو عدة كلمات مفتاحية تحتاج المتصفح بنفس اللحظة (بعد ما
+// صرنا نبحث عن كل الكلمات بالتوازي)، الكل ينتظر نفس عملية الإطلاق بدل ما كل
+// واحدة تطلق متصفح Chrome منفصل لحالها (يستهلك ذاكرة مضاعفة بلا داعي).
+let launchingPromise = null;
+
 async function getBrowser() {
   // ملاحظة: كائن المتصفح اللي يرجعه puppeteer-extra (مع stealth) ما يعرض
   // isConnected() كدالة — بس خاصية connected مباشرة. استخدام isConnected()
   // هنا كان يرمي "is not a function" ويفشّل كل محاولة تالية بعد أول إطلاق ناجح.
   if (browserInstance && browserInstance.connected) return browserInstance;
+  if (launchingPromise) return launchingPromise;
+
+  launchingPromise = (async () => {
+    let browser;
+    try {
+      browser = await launchBrowser();
+    } catch (err) {
+      const isMissingChrome = /Could not find Chrome/i.test(err.message);
+      // ما نكرر محاولة التثبيت كل دورة فحص لو فشلت مرة (تجنّب تعليق متكرر لكل
+      // دورة على نفس الخطأ)، بس نجربها مرة وحدة فعلية أول ما تصير المشكلة.
+      if (isMissingChrome && !chromeInstallAttempted) {
+        chromeInstallAttempted = true;
+        try {
+          await installChromeForPuppeteer();
+          browser = await launchBrowser();
+        } catch (installErr) {
+          // نطبع stderr/stdout الفعلي لعملية التثبيت (لو موجود) — السبب الحقيقي
+          // للفشل (صلاحيات، شبكة، مساحة قرص...) عادة يكون فيه لا برسالة الخطأ
+          // العامة فقط، عشان يظهر مباشرة بـ /testscan بدون الحاجة نبحث باللوقات.
+          const detail = installErr.stderr || installErr.stdout || installErr.message;
+          console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', detail);
+          throw new Error(`Chrome auto-install failed: ${detail}`);
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    browser.on('disconnected', () => { browserInstance = null; });
+    browserInstance = browser;
+    return browser;
+  })();
 
   try {
-    browserInstance = await launchBrowser();
-  } catch (err) {
-    const isMissingChrome = /Could not find Chrome/i.test(err.message);
-    // ما نكرر محاولة التثبيت كل دورة فحص لو فشلت مرة (تجنّب تعليق متكرر لكل
-    // دورة على نفس الخطأ)، بس نجربها مرة وحدة فعلية أول ما تصير المشكلة.
-    if (isMissingChrome && !chromeInstallAttempted) {
-      chromeInstallAttempted = true;
-      try {
-        await installChromeForPuppeteer();
-        browserInstance = await launchBrowser();
-      } catch (installErr) {
-        // نطبع stderr/stdout الفعلي لعملية التثبيت (لو موجود) — السبب الحقيقي
-        // للفشل (صلاحيات، شبكة، مساحة قرص...) عادة يكون فيه لا برسالة الخطأ
-        // العامة فقط، عشان يظهر مباشرة بـ /testscan بدون الحاجة نبحث باللوقات.
-        const detail = installErr.stderr || installErr.stdout || installErr.message;
-        console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', detail);
-        throw new Error(`Chrome auto-install failed: ${detail}`);
-      }
-    } else {
-      throw err;
-    }
+    return await launchingPromise;
+  } finally {
+    launchingPromise = null;
   }
-
-  browserInstance.on('disconnected', () => { browserInstance = null; });
-  return browserInstance;
 }
 
 async function fetchRenderedHtml(url) {
@@ -559,28 +575,34 @@ async function runRadarScan(forceKeyword = null) {
     const uniqueKeywords = alerts.length > 0 ? [...new Set(allKeywords)] : [forceKeyword];
     const aggregated = new Map(); // platformLabel -> { status, count, error }
 
-    for (const keyword of uniqueKeywords) {
-      const alertsForKeyword = alerts.filter((a) => getAlertKeywords(a).includes(keyword));
+    // نبحث عن كل الكلمات المفتاحية بالتوازي (مو وحدة ورا وحدة) — قبل هذا
+    // التعديل، لو عندك 3 رادارات مثلاً، كانت كل كلمة تنتظر مزاد قطر (أبطأ
+    // منصة، ~20-30 ثانية) يخلص قبل ما تبدأ الكلمة التالية، فتتراكم دقائق فوق
+    // بعض. المتصفح نفسه محمي بقفل إطلاق واحد (getBrowser) فما يفتح أكثر من
+    // نسخة Chrome حتى لو عدة كلمات طلبته بنفس اللحظة.
+    await Promise.allSettled(
+      uniqueKeywords.map(async (keyword) => {
+        const alertsForKeyword = alerts.filter((a) => getAlertKeywords(a).includes(keyword));
 
-      // كل دالة بحث ترسل تنبيهاتها بنفسها فور جهوزية نتائجها (داخل الدالة
-      // نفسها) — هنا فقط نجمع الأرقام للتشخيص/الـ testscan، وما ننتظر أبطأ
-      // منصة (مزاد قطر) قبل ما نطابق نتائج البقية.
-      const settled = await Promise.allSettled(
-        PLATFORM_SEARCHERS.map((p) => p.search(keyword, alertsForKeyword))
-      );
+        // كل دالة بحث ترسل تنبيهاتها بنفسها فور جهوزية نتائجها (داخل الدالة
+        // نفسها) — هنا فقط نجمع الأرقام للتشخيص/الـ testscan.
+        const settled = await Promise.allSettled(
+          PLATFORM_SEARCHERS.map((p) => p.search(keyword, alertsForKeyword))
+        );
 
-      settled.forEach((r, i) => {
-        const label = PLATFORM_SEARCHERS[i].label;
-        const prev = aggregated.get(label) || { status: 0, count: 0, error: null };
+        settled.forEach((r, i) => {
+          const label = PLATFORM_SEARCHERS[i].label;
+          const prev = aggregated.get(label) || { status: 0, count: 0, error: null };
 
-        if (r.status === 'fulfilled') {
-          const { listings, status, error } = r.value;
-          aggregated.set(label, { status, count: prev.count + listings.length, error: error || prev.error });
-        } else {
-          aggregated.set(label, { status: prev.status, count: prev.count, error: r.reason?.message || 'unknown error' });
-        }
-      });
-    }
+          if (r.status === 'fulfilled') {
+            const { listings, status, error } = r.value;
+            aggregated.set(label, { status, count: prev.count + listings.length, error: error || prev.error });
+          } else {
+            aggregated.set(label, { status: prev.status, count: prev.count, error: r.reason?.message || 'unknown error' });
+          }
+        });
+      })
+    );
 
     return [...aggregated.entries()].map(([platform, v]) => ({ platform, ...v }));
   } finally {
