@@ -4,6 +4,10 @@ import { Telegraf, Markup } from 'telegraf';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+puppeteer.use(StealthPlugin());
 
 // ------------------- خادم الويب للحفاظ على نشاط الخدمة على Render -------------------
 const PORT = process.env.PORT || 10000;
@@ -172,7 +176,9 @@ bot.command('testscan', async (ctx) => {
   try {
     await ctx.reply(t.testscan_running);
     const alerts = getAlerts();
-    const results = await runRadarScan();
+    // لو ما فيه رادارات نشطة، نستخدم كلمة اختبار عامة عشان نتحقق من وصول
+    // المنصات فعلياً بدل ما نرجع تقرير فاضي.
+    const results = await runRadarScan(alerts.length === 0 ? 'قطر' : null);
 
     const lines = results.map(r => {
       const statusIcon = r.error ? '❌' : '✅';
@@ -254,128 +260,254 @@ const httpClient = axios.create({
   validateStatus: () => true
 });
 
-// يحاول عدة محددات CSS واقعية لبطاقات الإعلانات حتى يجد نتائج كافية
-function extractListings($, baseUrl, cardSelectors) {
-  for (const sel of cardSelectors) {
-    const cards = $(sel);
-    if (cards.length < 3) continue;
+// ------------------- متصفح حقيقي (Puppeteer) للمنصات المحمية بـ JS/Cloudflare -------------------
+// نستخدم نسخة واحدة مشتركة من المتصفح (بدل فتح متصفح جديد كل دورة فحص) لتقليل
+// استهلاك الذاكرة على Render. لو فشل الإطلاق (مثلاً مكتبات نظام ناقصة) نسجل الخطأ
+// وما نوقف بقية النظام.
+let browserInstance = null;
+async function getBrowser() {
+  if (browserInstance && browserInstance.isConnected()) return browserInstance;
+  browserInstance = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+  });
+  browserInstance.on('disconnected', () => { browserInstance = null; });
+  return browserInstance;
+}
 
-    const listings = [];
-    cards.each((i, el) => {
-      const $el = $(el);
-      const rawLink = $el.is('a') ? $el.attr('href') : $el.find('a').first().attr('href');
-      if (!rawLink) return;
+async function fetchRenderedHtml(url) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'ar-QA,ar;q=0.9,en-US;q=0.8,en;q=0.7' });
+    await page.setViewport({ width: 1366, height: 900 });
+    const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
+    const status = response ? response.status() : 0;
+    // فرصة إضافية بسيطة لأي محتوى يتحمّل بعد حدث التحميل الأساسي
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const html = await page.content();
+    return { html, status };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
 
-      const titleEl = $el.find('h1, h2, h3, h4, h5, .title, .ad-title, .card-title, [class*="title"]').first();
-      const priceEl = $el.find('.price, .ad-price, [class*="price"]').first();
+// ------------------- بحث حقيقي لكل منصة (لا نمسح الصفحة الرئيسية أبداً) -------------------
+// كل صفحة رئيسية لهذه المواقع هي قائمة تصنيفات/تنقّل فقط، بدون إعلانات فعلية.
+// اكتشفنا آلية البحث الحقيقية لكل منصة (رابط بحث SSR أو API داخلي) بالفحص المباشر.
 
-      const title = (titleEl.text() || $el.text()).replace(/\s+/g, ' ').trim();
-      const priceText = priceEl.text().replace(/\s+/g, ' ').trim();
-      const text = priceText && !title.includes(priceText) ? `${title} ${priceText}` : title;
+function buildListingText(title, priceText) {
+  const t = (title || '').replace(/\s+/g, ' ').trim();
+  const p = (priceText || '').replace(/\s+/g, ' ').trim();
+  return p && !t.includes(p) ? `${t} ${p}` : t;
+}
 
-      if (!text || text.length < 5) return;
-      const fullLink = rawLink.startsWith('http') ? rawLink : baseUrl + rawLink;
-      listings.push({ text, link: fullLink });
+// Qatar Living: API بحث نظيف مستقل تماماً عن الموقع الرئيسي (Azure)، بدون أي
+// حماية Cloudflare وبدون حاجة لمتصفح حقيقي.
+async function searchQatarLiving(keyword) {
+  const logTag = 'QatarLiving';
+  try {
+    const res = await axios.post('https://ql-global-search-api-prod.azurewebsites.net/v1/search', {
+      q: keyword,
+      filters: {},
+      sort: 'relevance',
+      page: 1,
+      page_size: 20,
+      mode: 'hybrid',
+      semantic: true,
+      vertical: 'classifieds'
+    }, {
+      timeout: 10000,
+      headers: {
+        'content-type': 'application/json',
+        'x-qls-platform': 'web',
+        'x-qls-device': 'radarbot-device',
+        'x-qls-session': 'radarbot-session',
+        'accept-language': 'ar',
+        'origin': 'https://www.qatarliving.com',
+        'referer': 'https://www.qatarliving.com/'
+      },
+      validateStatus: () => true
     });
 
-    if (listings.length) return listings;
-  }
-  return [];
-}
+    const results = res.data?.results || [];
+    const listings = results.map((r) => ({
+      text: buildListingText(r.title, r.price ? `${r.price} ${r.price_type || 'QAR'}` : ''),
+      link: `https://www.qatarliving.com/en/classifieds/items/${r.slug}`
+    }));
 
-// خطة احتياطية: مسح كل الروابط واستنتاج النص من أقرب حاوية أب
-function extractListingsFallback($, baseUrl) {
-  const listings = [];
-  $('a').each((i, el) => {
-    const $el = $(el);
-    const rawLink = $el.attr('href') || '';
-    const containerText = $el.closest('div, li, article').text().replace(/\s+/g, ' ').trim();
-    const text = containerText.length > 10 ? containerText : $el.text().replace(/\s+/g, ' ').trim();
-
-    if (!rawLink || text.length < 5) return;
-    const fullLink = rawLink.startsWith('http') ? rawLink : baseUrl + rawLink;
-    listings.push({ text, link: fullLink });
-  });
-  return listings;
-}
-
-async function scanPlatform({ label, logTag, url, baseUrl, cardSelectors, alerts }) {
-  try {
-    const response = await httpClient.get(url);
-    const status = response.status;
-    const $ = cheerio.load(response.data || '');
-
-    let listings = extractListings($, baseUrl, cardSelectors);
-    if (listings.length === 0) listings = extractListingsFallback($, baseUrl);
-
-    console.log(`[${logTag}] Found ${listings.length} listings (HTTP ${status})`);
-
-    for (const { text, link } of listings) {
-      checkAndSendAlert(alerts, text, link, label);
-    }
-
-    return { platform: label, status, count: listings.length, error: null };
+    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    return { listings, status: res.status, error: null };
   } catch (err) {
-    const status = err.response?.status || 0;
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
-    return { platform: label, status, count: 0, error: err.message };
+    return { listings: [], status: err.response?.status || 0, error: err.message };
   }
 }
 
-async function runRadarScan() {
-  const alerts = getAlerts();
-  console.log(`🔍 [Radar] بدء جولة فحص المنصات لـ (${alerts.length}) رادار نشط...`);
+// Qatar Sale: نفس الفكرة — API بحث نظيف (production-api.yousale.com، منصة
+// yousale التي تُشغّل قطر سيل) منفصل عن الموقع المحمي بـ Cloudflare.
+async function searchQatarSale(keyword) {
+  const logTag = 'QatarSale';
+  try {
+    const res = await axios.post('https://production-api.yousale.com/api/v2/Products', {
+      url: `/ar/products?key=${encodeURIComponent(keyword)}`,
+      includeFavs: false,
+      pageSize: 36
+    }, {
+      timeout: 10000,
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'ar',
+        'x-tenant-id': 'Qatarsale',
+        'version': '6.11.0',
+        'platform': '0',
+        'referer': 'https://qatarsale.com/',
+        'origin': 'https://qatarsale.com'
+      },
+      validateStatus: () => true
+    });
 
-  const platforms = [
-    {
-      // معروف: هذا الموقع محمي بـ Cloudflare/WAF حقيقي (يرجع HTTP 403 دائماً).
-      // تغيير الهيدرز وحده غير كافٍ لتجاوزه — يحتاج متصفح حقيقي (Puppeteer) أو
-      // خدمة Anti-bot مدفوعة. تم تأجيل هذا الحل عمداً لتبقى الخدمة خفيفة ومستقرة.
-      label: 'Mzad Qatar | مزاد قطر',
-      logTag: 'Mzad',
-      url: 'https://mzadqatar.com/ar',
-      baseUrl: 'https://mzadqatar.com',
-      cardSelectors: ['.ad-card', '.listing-card', 'article', '.card', 'li.item', '[class*="listing"]']
-    },
-    {
-      // معروف: صفحة الإعلانات هنا تطبيق SPA يحمّل الإعلانات الفعلية عبر
-      // JavaScript بعد التحميل الأولي — غير موجودة في الـ HTML الذي يجلبه axios.
-      // نفس قرار عدم إضافة متصفح حقيقي (Puppeteer) ينطبق هنا لنفس سبب الاستقرار.
-      label: 'Qatar Living | قطر ليفنج',
-      logTag: 'QatarLiving',
-      url: 'https://www.qatarliving.com/classifieds',
-      baseUrl: 'https://www.qatarliving.com',
-      cardSelectors: ['.view-content .views-row', '.classified-item', 'article', '.card', '[class*="teaser"]']
-    },
-    {
-      label: 'OpenSooq | السوق المفتوح',
-      logTag: 'OpenSooq',
-      url: 'https://qa.opensooq.com/ar',
-      baseUrl: 'https://qa.opensooq.com',
-      cardSelectors: ['.postListItemData', '.item', 'article', '.card', 'li.item']
-    },
-    {
-      // معروف: نفس وضع مزاد قطر — حماية Cloudflare/WAF حقيقية (HTTP 403).
-      label: 'Qatar Sale | قطر سيل',
-      logTag: 'QatarSale',
-      url: 'https://qatarsale.com',
-      baseUrl: 'https://qatarsale.com',
-      cardSelectors: ['.product', '.item', 'article', '.card', 'tr']
+    const list = res.data?.list || [];
+    // رابط صفحة نتائج البحث نفسها (وليس رابط إعلان مباشر — لم نتحقق من نمط
+    // رابط الإعلان الفردي الحقيقي)، يوصل المستخدم لنفس النتيجة على الموقع الحقيقي.
+    const searchPageLink = `https://qatarsale.com/ar/products?key=${encodeURIComponent(keyword)}`;
+    const listings = list.map((p) => ({
+      text: buildListingText(p.title, p.startingPrice ? `${p.startingPrice.toLocaleString()} QAR` : ''),
+      link: searchPageLink
+    }));
+
+    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    return { listings, status: res.status, error: null };
+  } catch (err) {
+    console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
+    return { listings: [], status: err.response?.status || 0, error: err.message };
+  }
+}
+
+// OpenSooq: صفحة نتائج البحث فعلياً SSR (Server-Side Rendered) — لا حاجة لمتصفح
+// حقيقي ولا حماية Cloudflare تمنعها، axios+cheerio كافيان.
+async function searchOpenSooq(keyword) {
+  const logTag = 'OpenSooq';
+  try {
+    const url = `https://qa.opensooq.com/ar/find?term=${encodeURIComponent(keyword)}&search=true`;
+    const res = await httpClient.get(url);
+    const $ = cheerio.load(res.data || '');
+
+    const listings = [];
+    $('.postListItemData').each((i, el) => {
+      const $el = $(el);
+      const href = $el.attr('href') || $el.find('a').first().attr('href') || '';
+      const title = $el.find('h2').first().text();
+      const priceText = $el.find('[class*="redColor"]').first().text();
+      const text = buildListingText(title, priceText);
+      if (!href || !text) return;
+      listings.push({ text, link: href.startsWith('http') ? href : 'https://qa.opensooq.com' + href });
+    });
+
+    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
+    return { listings, status: res.status, error: null };
+  } catch (err) {
+    console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
+    return { listings: [], status: err.response?.status || 0, error: err.message };
+  }
+}
+
+// Mzad Qatar: المنصة الوحيدة التي احتاجت متصفح حقيقي (Puppeteer + Stealth) —
+// محمية بـ Cloudflare حقيقي على صفحاتها، ونتائج البحث نفسها SPA (Vue).
+async function searchMzadQatar(keyword) {
+  const logTag = 'Mzad';
+  try {
+    const url = `https://mzadqatar.com/search_tags?productId=0&searchStr=${encodeURIComponent(keyword)}`;
+    const { html, status } = await fetchRenderedHtml(url);
+    const $ = cheerio.load(html);
+
+    const listings = [];
+    $('.product').each((i, el) => {
+      const $el = $(el);
+      const href = $el.find('a[href]').first().attr('href') || '';
+      const title = $el.find('h3').first().text();
+      const priceText = $el.find('.price').first().text();
+      const text = buildListingText(title, priceText);
+      if (!href || !text) return;
+      listings.push({ text, link: href.startsWith('http') ? href : 'https://mzadqatar.com' + href });
+    });
+
+    console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${status}, rendered)`);
+    if (status === 403 && listings.length === 0) {
+      console.log(`⚠️ [${logTag}] محجوب حتى مع متصفح حقيقي (Cloudflare متقدم) — يحتاج خدمة Anti-bot مدفوعة لتجاوزه.`);
     }
-    // Sooum (sooum.com) مُعطّلة عمداً: الدومين لا يستجيب فعلياً ويشير إلى
-    // عنوان IP غير متعلق بقطر إطلاقاً (يبدو منتهي الصلاحية أو مسجّل لجهة أخرى)،
-    // وليست مجرد حماية بوتات. أعد تفعيلها هنا فقط لو توفر رابط صحيح للمنصة.
-  ];
+    return { listings, status, error: null };
+  } catch (err) {
+    console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
+    return { listings: [], status: err.response?.status || 0, error: err.message };
+  }
+}
 
-  const settled = await Promise.allSettled(
-    platforms.map(p => scanPlatform({ ...p, alerts }))
-  );
+const PLATFORM_SEARCHERS = [
+  { label: 'Mzad Qatar | مزاد قطر', search: searchMzadQatar },
+  { label: 'Qatar Living | قطر ليفنج', search: searchQatarLiving },
+  { label: 'OpenSooq | السوق المفتوح', search: searchOpenSooq },
+  { label: 'Qatar Sale | قطر سيل', search: searchQatarSale }
+  // Sooum (sooum.com) مُعطّلة عمداً: الدومين لا يستجيب فعلياً ويشير إلى عنوان IP
+  // غير متعلق بقطر إطلاقاً، وليست مجرد حماية بوتات. أعد تفعيلها لو توفر رابط صحيح.
+];
 
-  return settled.map((r, i) =>
-    r.status === 'fulfilled'
-      ? r.value
-      : { platform: platforms[i].label, status: 0, count: 0, error: r.reason?.message || 'unknown error' }
-  );
+// حماية بسيطة من تداخل دورتين فحص فوق بعض (المتصفح الحقيقي أبطأ من axios وقد
+// تطول دورة الفحص أكثر من دقيقة الـ heartbeat).
+let scanInProgress = false;
+
+async function runRadarScan(forceKeyword = null) {
+  if (scanInProgress) {
+    console.log('⏭️ [Radar] تخطي هذه الدورة — دورة فحص سابقة لسا شغالة.');
+    return [];
+  }
+  scanInProgress = true;
+
+  try {
+    const alerts = getAlerts();
+    console.log(`🔍 [Radar] بدء جولة فحص لـ (${alerts.length}) رادار نشط...`);
+
+    if (alerts.length === 0 && !forceKeyword) {
+      console.log('ℹ️ [Radar] لا توجد رادارات نشطة حالياً — تخطي البحث في المنصات.');
+      return [];
+    }
+
+    // نبحث لكل كلمة مفتاحية فريدة مرة واحدة فقط (حتى لو عدة مستخدمين يشتركون
+    // بنفس الكلمة)، ونطابق النتائج مع كل رادار له نفس الكلمة. لو ما فيه رادارات
+    // حقيقية (مثلاً استدعاء تشخيصي من /testscan) نستخدم forceKeyword فقط
+    // للتحقق من وصول المنصات، بدون إرسال أي تنبيه فعلي لأحد.
+    const uniqueKeywords = alerts.length > 0 ? [...new Set(alerts.map((a) => a.keyword))] : [forceKeyword];
+    const aggregated = new Map(); // platformLabel -> { status, count, error }
+
+    for (const keyword of uniqueKeywords) {
+      const alertsForKeyword = alerts.filter((a) => a.keyword === keyword);
+
+      const settled = await Promise.allSettled(
+        PLATFORM_SEARCHERS.map((p) => p.search(keyword))
+      );
+
+      settled.forEach((r, i) => {
+        const label = PLATFORM_SEARCHERS[i].label;
+        const prev = aggregated.get(label) || { status: 0, count: 0, error: null };
+
+        if (r.status === 'fulfilled') {
+          const { listings, status, error } = r.value;
+          for (const { text, link } of listings) {
+            checkAndSendAlert(alertsForKeyword, text, link, label);
+          }
+          aggregated.set(label, { status, count: prev.count + listings.length, error: error || prev.error });
+        } else {
+          aggregated.set(label, { status: prev.status, count: prev.count, error: r.reason?.message || 'unknown error' });
+        }
+      });
+    }
+
+    return [...aggregated.entries()].map(([platform, v]) => ({ platform, ...v }));
+  } finally {
+    scanInProgress = false;
+  }
 }
 
 function checkAndSendAlert(alerts, text, fullLink, platformName) {
@@ -434,5 +566,11 @@ bot.launch({
   console.error('⚠️ تحذير اتصال تليجرام (409 أو انقطاع شبكة على الأرجح):', err.message);
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+async function shutdown(signal) {
+  bot.stop(signal);
+  if (browserInstance) {
+    await browserInstance.close().catch(() => {});
+  }
+}
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
