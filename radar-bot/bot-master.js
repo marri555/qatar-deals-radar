@@ -186,7 +186,9 @@ bot.command('testscan', async (ctx) => {
     const alerts = getAlerts();
     // لو ما فيه رادارات نشطة، نستخدم كلمة اختبار عامة عشان نتحقق من وصول
     // المنصات فعلياً بدل ما نرجع تقرير فاضي.
-    const results = await runRadarScan(alerts.length === 0 ? 'قطر' : null);
+    // waitForMzad: true — /testscan طلب صريح لمرة وحدة، المستخدم يبي يشوف
+    // تقرير مزاد قطر أيضاً حتى لو بطيء، بعكس الفحص الدوري اللي ما ينتظره.
+    const results = await runRadarScan(alerts.length === 0 ? 'قطر' : null, true);
 
     const lines = results.map(r => {
       const statusIcon = r.error ? '❌' : '✅';
@@ -283,14 +285,19 @@ async function fetchRenderedHtml(url) {
     throw new Error('ZENROWS_API_KEY غير موجود في متغيرات البيئة — أضفه في .env محلياً وفي Render → Environment');
   }
 
+  // مهلة أطول من العادي: js_render + premium_proxy سوا يعني ZenRows يشغّل
+  // متصفح حقيقي ويجرّب أكثر من بروكسي من جهته لتجاوز Cloudflare — هذا يأخذ
+  // وقت أطول بكثير من طلب HTTP عادي، خصوصاً لموقع محمي بقوة زي مزاد قطر.
+  // mode=auto (Adaptive Stealth) بدل الإجبار الدائم على js_render+premium_proxy:
+  // ZenRows يقرر بنفسه أخف إعداد كافٍ للنجاح ويصعّد تلقائياً لو احتاج، بدل ما
+  // نفرض أغلى/أبطأ إعداد بكل مرة حتى لو مو ضروري.
   const response = await axios.get('https://api.zenrows.com/v1/', {
     params: {
       apikey: apiKey,
       url,
-      js_render: 'true',
-      premium_proxy: 'true'
+      mode: 'auto'
     },
-    timeout: 30000,
+    timeout: 90000,
     validateStatus: () => true
   });
 
@@ -466,8 +473,10 @@ async function searchMzadQatar(keyword, alertsForKeyword) {
   }
 }
 
-const PLATFORM_SEARCHERS = [
-  { label: 'Mzad Qatar | مزاد قطر', search: searchMzadQatar },
+const MZAD_LABEL = 'Mzad Qatar | مزاد قطر';
+
+// المنصات "السريعة" (بدون ZenRows) — هذي وحدها تتحكم بغلق/فتح دورة الفحص.
+const FAST_PLATFORM_SEARCHERS = [
   { label: 'Qatar Living | قطر ليفنج', search: searchQatarLiving },
   { label: 'OpenSooq | السوق المفتوح', search: searchOpenSooq },
   { label: 'Qatar Sale | قطر سيل', search: searchQatarSale }
@@ -475,11 +484,31 @@ const PLATFORM_SEARCHERS = [
   // غير متعلق بقطر إطلاقاً، وليست مجرد حماية بوتات. أعد تفعيلها لو توفر رابط صحيح.
 ];
 
-// حماية بسيطة من تداخل دورتين فحص فوق بعض (المتصفح الحقيقي أبطأ من axios وقد
-// تطول دورة الفحص أكثر من دقيقة الـ heartbeat).
+// حماية بسيطة من تداخل دورتين فحص فوق بعض.
 let scanInProgress = false;
 
-async function runRadarScan(forceKeyword = null) {
+// حماية مستقلة خاصة بمزاد قطر فقط: ZenRows (js_render+premium_proxy) أثبت
+// إنه ممكن ياخذ أكثر من 90 ثانية بدون ما يخلص أصلاً لمزاد قطر تحديداً. لو
+// خليناه يشارك بنفس قفل scanInProgress، طلب واحد بطيء/معلّق بيوقف كل الدورات
+// الجاية حتى للمنصات الثلاث السريعة الشغالة تمام. فصلناه تماماً: يشتغل
+// بالخلفية بدون ما ينتظره أحد، وله قفل خاص يمنع تراكم عدة طلبات فوقه.
+let mzadInProgress = false;
+
+function fireMzadInBackground(keyword, alertsForKeyword) {
+  if (mzadInProgress) {
+    console.log('⏭️ [Mzad] تخطي — طلب سابق لمزاد قطر لسا شغال (ZenRows بطيء).');
+    return;
+  }
+  mzadInProgress = true;
+  searchMzadQatar(keyword, alertsForKeyword)
+    .catch((err) => console.log('⚠️ [Mzad] فحص خلفي فشل:', err.message))
+    .finally(() => { mzadInProgress = false; });
+}
+
+// waitForMzad=true تُستخدم فقط من /testscan (طلب صريح لمرة وحدة يبي تقرير
+// كامل) — الفحص الدوري (heartbeat) يمرر false دائماً عشان بطء مزاد قطر ما
+// يأخّر أو يوقف فحص بقية المنصات.
+async function runRadarScan(forceKeyword = null, waitForMzad = false) {
   if (scanInProgress) {
     console.log('⏭️ [Radar] تخطي هذه الدورة — دورة فحص سابقة لسا شغالة.');
     return [];
@@ -504,11 +533,7 @@ async function runRadarScan(forceKeyword = null) {
     const uniqueKeywords = alerts.length > 0 ? [...new Set(allKeywords)] : [forceKeyword];
     const aggregated = new Map(); // platformLabel -> { status, count, error }
 
-    // نبحث عن كل الكلمات المفتاحية بالتوازي (مو وحدة ورا وحدة) — قبل هذا
-    // التعديل، لو عندك 3 رادارات مثلاً، كانت كل كلمة تنتظر مزاد قطر (أبطأ
-    // منصة، ~20-30 ثانية) يخلص قبل ما تبدأ الكلمة التالية، فتتراكم دقائق فوق
-    // بعض. المتصفح نفسه محمي بقفل إطلاق واحد (getBrowser) فما يفتح أكثر من
-    // نسخة Chrome حتى لو عدة كلمات طلبته بنفس اللحظة.
+    // نبحث عن كل الكلمات المفتاحية بالتوازي (مو وحدة ورا وحدة).
     await Promise.allSettled(
       uniqueKeywords.map(async (keyword) => {
         const alertsForKeyword = alerts.filter((a) => getAlertKeywords(a).includes(keyword));
@@ -516,11 +541,11 @@ async function runRadarScan(forceKeyword = null) {
         // كل دالة بحث ترسل تنبيهاتها بنفسها فور جهوزية نتائجها (داخل الدالة
         // نفسها) — هنا فقط نجمع الأرقام للتشخيص/الـ testscan.
         const settled = await Promise.allSettled(
-          PLATFORM_SEARCHERS.map((p) => p.search(keyword, alertsForKeyword))
+          FAST_PLATFORM_SEARCHERS.map((p) => p.search(keyword, alertsForKeyword))
         );
 
         settled.forEach((r, i) => {
-          const label = PLATFORM_SEARCHERS[i].label;
+          const label = FAST_PLATFORM_SEARCHERS[i].label;
           const prev = aggregated.get(label) || { status: 0, count: 0, error: null };
 
           if (r.status === 'fulfilled') {
@@ -530,6 +555,19 @@ async function runRadarScan(forceKeyword = null) {
             aggregated.set(label, { status: prev.status, count: prev.count, error: r.reason?.message || 'unknown error' });
           }
         });
+
+        if (waitForMzad) {
+          try {
+            const r = await searchMzadQatar(keyword, alertsForKeyword);
+            const prev = aggregated.get(MZAD_LABEL) || { status: 0, count: 0, error: null };
+            aggregated.set(MZAD_LABEL, { status: r.status, count: prev.count + r.listings.length, error: r.error || prev.error });
+          } catch (err) {
+            const prev = aggregated.get(MZAD_LABEL) || { status: 0, count: 0, error: null };
+            aggregated.set(MZAD_LABEL, { status: prev.status, count: prev.count, error: err.message });
+          }
+        } else {
+          fireMzadInBackground(keyword, alertsForKeyword);
+        }
       })
     );
 
