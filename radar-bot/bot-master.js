@@ -6,7 +6,10 @@ import * as cheerio from 'cheerio';
 import fs from 'fs';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
+const execAsync = promisify(exec);
 puppeteer.use(StealthPlugin());
 
 // ------------------- خادم الويب للحفاظ على نشاط الخدمة على Render -------------------
@@ -278,13 +281,51 @@ const httpClient = axios.create({
 // نستخدم نسخة واحدة مشتركة من المتصفح (بدل فتح متصفح جديد كل دورة فحص) لتقليل
 // استهلاك الذاكرة على Render. لو فشل الإطلاق (مثلاً مكتبات نظام ناقصة) نسجل الخطأ
 // وما نوقف بقية النظام.
+const PUPPETEER_LAUNCH_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
+
+function launchBrowser() {
+  return puppeteer.launch({ headless: 'new', args: PUPPETEER_LAUNCH_ARGS });
+}
+
+// تثبيت ذاتي لمتصفح Chrome عند الحاجة: بعض بيئات النشر (زي Render) لا تُشغّل
+// postinstall/build command المتوقع بشكل موثوق، فبدل ما نعتمد على إعدادات
+// النشر الخارجية، نتحقق ونثبّت وقت التشغيل الفعلي مباشرة — يشتغل بغض النظر
+// عن إعدادات لوحة Render.
+async function installChromeForPuppeteer() {
+  console.log('🔧 [Puppeteer] تثبيت Chrome تلقائياً (أول مرة فقط، قد يأخذ دقيقة تقريباً)...');
+  // نستخدم exec (عبر shell) مو execFile — npx على بعض الأنظمة (وWindows دائماً)
+  // هو ملف .cmd/سكربت غلاف، وexecFile المباشر يفشل بخطأ ENOENT لأنه ما يحله
+  // عبر PATH صح. الأمر ثابت وما فيه أي مدخلات مستخدم، فما فيه خطر حقن أوامر.
+  await execAsync('npx puppeteer browsers install chrome', { timeout: 120000 });
+  console.log('✅ [Puppeteer] تم تثبيت Chrome بنجاح.');
+}
+
 let browserInstance = null;
+let chromeInstallAttempted = false;
+
 async function getBrowser() {
   if (browserInstance && browserInstance.isConnected()) return browserInstance;
-  browserInstance = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-  });
+
+  try {
+    browserInstance = await launchBrowser();
+  } catch (err) {
+    const isMissingChrome = /Could not find Chrome/i.test(err.message);
+    // ما نكرر محاولة التثبيت كل دورة فحص لو فشلت مرة (تجنّب تعليق متكرر لكل
+    // دورة على نفس الخطأ)، بس نجربها مرة وحدة فعلية أول ما تصير المشكلة.
+    if (isMissingChrome && !chromeInstallAttempted) {
+      chromeInstallAttempted = true;
+      try {
+        await installChromeForPuppeteer();
+        browserInstance = await launchBrowser();
+      } catch (installErr) {
+        console.error('❌ [Puppeteer] فشل التثبيت التلقائي لـ Chrome:', installErr.message);
+        throw err; // نرمي الخطأ الأصلي الواضح بدل خطأ التثبيت
+      }
+    } else {
+      throw err;
+    }
+  }
+
   browserInstance.on('disconnected', () => { browserInstance = null; });
   return browserInstance;
 }
