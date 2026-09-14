@@ -81,7 +81,13 @@ const i18n = {
     no_alerts: '⚠️ ليس لديك أي رادارات نشطة حالياً.',
     my_alerts_title: '📋 <b>راداراتك الشغالة حالياً:</b>\n\n',
     cleared: '🗑️ تم مسح جميع راداراتك بنجاح.',
-    alert_msg: (platform, kw, text, price, link) => `🚨 <b>صيدة جديدة تطابق رادارك!</b>\n\n📍 <b>المنصة:</b> ${platform}\n🎯 <b>طلبك:</b> ${kw}\n📝 <b>الإعلان:</b> ${text}\n💰 <b>السعر:</b> ${price > 0 ? price.toLocaleString() + ' ر.ق' : 'راجع الإعلان'}\n\n🔗 <a href="${link}">اضغط هنا لفتح الإعلان فوراً</a>`,
+    alerts_digest: (platform, items) => {
+      let msg = `🚨 <b>${items.length} صفقة جديدة على ${platform}!</b>\n`;
+      items.forEach((item, i) => {
+        msg += `\n${i + 1}. 🎯 <b>${item.keyword}</b>\n📝 ${item.text}\n💰 ${item.price > 0 ? item.price.toLocaleString() + ' ر.ق' : 'راجع الإعلان'}\n🔗 <a href="${item.link}">فتح الإعلان</a>`;
+      });
+      return msg;
+    },
     testscan_running: '🔍 جارٍ تشغيل فحص تشخيصي فوري...',
     testscan_report: (alertsCount, lines) => `🧪 <b>تقرير الفحص التشخيصي</b>\n\n📋 <b>عدد الرادارات النشطة:</b> ${alertsCount}\n\n${lines}`
   },
@@ -97,7 +103,13 @@ const i18n = {
     no_alerts: '⚠️ You have no active radars currently.',
     my_alerts_title: '📋 <b>Your Active Radars:</b>\n\n',
     cleared: '🗑️ All your radars have been cleared.',
-    alert_msg: (platform, kw, text, price, link) => `🚨 <b>New Deal Found!</b>\n\n📍 <b>Platform:</b> ${platform}\n🎯 <b>Keyword:</b> ${kw}\n📝 <b>Title:</b> ${text}\n💰 <b>Price:</b> ${price > 0 ? price.toLocaleString() + ' QAR' : 'Check Listing'}\n\n🔗 <a href="${link}">Click here to view deal</a>`,
+    alerts_digest: (platform, items) => {
+      let msg = `🚨 <b>${items.length} new deal${items.length > 1 ? 's' : ''} on ${platform}!</b>\n`;
+      items.forEach((item, i) => {
+        msg += `\n${i + 1}. 🎯 <b>${item.keyword}</b>\n📝 ${item.text}\n💰 ${item.price > 0 ? item.price.toLocaleString() + ' QAR' : 'Check listing'}\n🔗 <a href="${item.link}">Open listing</a>`;
+      });
+      return msg;
+    },
     testscan_running: '🔍 Running immediate diagnostic scan...',
     testscan_report: (alertsCount, lines) => `🧪 <b>Diagnostic Scan Report</b>\n\n📋 <b>Active radars:</b> ${alertsCount}\n\n${lines}`
   }
@@ -341,9 +353,7 @@ async function searchQatarLiving(keyword, alertsForKeyword) {
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
     // نرسل التنبيه فوراً بمجرد جهوزية نتائج هذه المنصة، بدون انتظار بقية
     // المنصات (خصوصاً مزاد قطر الأبطأ بسبب المتصفح الحقيقي).
-    for (const { text, link } of listings) {
-      checkAndSendAlert(alertsForKeyword, text, link, label);
-    }
+    dispatchMatches(alertsForKeyword, listings, label);
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -386,9 +396,7 @@ async function searchQatarSale(keyword, alertsForKeyword) {
     }));
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
-    for (const { text, link } of listings) {
-      checkAndSendAlert(alertsForKeyword, text, link, label);
-    }
+    dispatchMatches(alertsForKeyword, listings, label);
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -418,9 +426,7 @@ async function searchOpenSooq(keyword, alertsForKeyword) {
     });
 
     console.log(`[${logTag}] "${keyword}": Found ${listings.length} listings (HTTP ${res.status})`);
-    for (const { text, link } of listings) {
-      checkAndSendAlert(alertsForKeyword, text, link, label);
-    }
+    dispatchMatches(alertsForKeyword, listings, label);
     return { listings, status: res.status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -455,9 +461,7 @@ async function searchMzadQatar(keyword, alertsForKeyword) {
     if (status === 403 && listings.length === 0) {
       console.log(`⚠️ [${logTag}] محجوب حتى مع متصفح حقيقي (Cloudflare متقدم) — يحتاج خدمة Anti-bot مدفوعة لتجاوزه.`);
     }
-    for (const { text, link } of listings) {
-      checkAndSendAlert(alertsForKeyword, text, link, label);
-    }
+    dispatchMatches(alertsForKeyword, listings, label);
     return { listings, status, error: null };
   } catch (err) {
     console.log(`⚠️ [${logTag}] فحص فشل:`, err.message);
@@ -539,9 +543,9 @@ function buildKeywordMatcher(keyword) {
   return new RegExp(`(?<![\\u0600-\\u06FF])${escaped}(?![\\u0600-\\u06FF])`, 'i');
 }
 
-function checkAndSendAlert(alerts, text, fullLink, platformName) {
-  if (alerts.length === 0) return;
-  if (seenAds.has(fullLink)) return;
+// يرجع كل الرادارات المطابقة لإعلان واحد (مو أول واحد بس) — عشان لو أكثر من
+// مستخدم مشترك بنفس الكلمة، الكل يوصله تنبيهه، مو أول واحد بالقائمة فقط.
+function findMatchingAlerts(alerts, text) {
   const lowerText = text.toLowerCase();
 
   // استخراج الأرقام المعبرة عن السعر إن وجدت
@@ -551,23 +555,46 @@ function checkAndSendAlert(alerts, text, fullLink, platformName) {
     adPrice = parseInt(priceMatch[1].replace(/,/g, '')) || 0;
   }
 
+  const matches = [];
   for (const alert of alerts) {
-    if (buildKeywordMatcher(alert.keyword).test(lowerText)) {
-      // مطابقة السعر: إذا كان الرادار لأي سعر (0) أو السعر ضمن الحد أو لم يتم التقاط رقم سعر صريح
-      const isPriceMatch = (alert.maxPrice === 0) || (adPrice > 0 && adPrice <= alert.maxPrice) || (adPrice === 0);
+    if (!buildKeywordMatcher(alert.keyword).test(lowerText)) continue;
+    // مطابقة السعر: إذا كان الرادار لأي سعر (0) أو السعر ضمن الحد أو لم يتم التقاط رقم سعر صريح
+    const isPriceMatch = (alert.maxPrice === 0) || (adPrice > 0 && adPrice <= alert.maxPrice) || (adPrice === 0);
+    if (isPriceMatch) matches.push({ alert, adPrice });
+  }
+  return matches;
+}
 
-      if (isPriceMatch) {
-        seenAds.add(fullLink);
+const MAX_ITEMS_PER_DIGEST = 20; // حماية من تجاوز حد رسائل تيليجرام لو تراكمت مطابقات كثيرة
 
-        const lang = alert.lang || 'ar';
-        const cleanTitle = text.slice(0, 90);
-        const msg = i18n[lang].alert_msg(platformName, alert.keyword, cleanTitle, adPrice, fullLink);
+// يفحص كل إعلانات منصة واحدة دفعة وحدة، ويرسل رسالة واحدة مجمّعة لكل مستخدم
+// تحتوي كل الصفقات الجديدة اللي طابقت راداراته على هذه المنصة بالذات، بدل
+// إرسال رسالة منفصلة لكل إعلان.
+function dispatchMatches(alerts, listings, platformName) {
+  if (alerts.length === 0) return;
 
-        bot.telegram.sendMessage(alert.chatId, msg, { parse_mode: 'HTML' }).catch(() => {});
-        console.log(`🎯 [صيدة ناجحة] المنصة: ${platformName} | الطلب: (${alert.keyword}) للمستخدم: ${alert.chatId}`);
-        break;
-      }
+  const itemsByChat = new Map(); // chatId -> { lang, items: [] }
+
+  for (const { text, link } of listings) {
+    if (seenAds.has(link)) continue;
+    const matches = findMatchingAlerts(alerts, text);
+    if (matches.length === 0) continue;
+
+    seenAds.add(link);
+    const cleanTitle = text.slice(0, 90);
+
+    for (const { alert, adPrice } of matches) {
+      const lang = alert.lang || 'ar';
+      if (!itemsByChat.has(alert.chatId)) itemsByChat.set(alert.chatId, { lang, items: [] });
+      itemsByChat.get(alert.chatId).items.push({ keyword: alert.keyword, text: cleanTitle, price: adPrice, link });
     }
+  }
+
+  for (const [chatId, { lang, items }] of itemsByChat) {
+    const shown = items.slice(0, MAX_ITEMS_PER_DIGEST);
+    const msg = i18n[lang].alerts_digest(platformName, shown);
+    bot.telegram.sendMessage(chatId, msg, { parse_mode: 'HTML' }).catch(() => {});
+    console.log(`🎯 [صفقات] ${platformName}: رسالة مجمّعة (${items.length} مطابقة) للمستخدم ${chatId}`);
   }
 }
 
